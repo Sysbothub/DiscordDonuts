@@ -50,7 +50,6 @@ VACATION_CHANNEL_ID = 1454909580894015754   # Vacation Requests
 
 # --- 2. DATABASE CONNECTION ---
 try:
-    # tz_aware=True forces MongoDB to return Timezone Aware dates
     cluster = MongoClient(MONGO_URI, tz_aware=True)
     db = cluster["patisserie_db"]
     orders_col = db["orders"]
@@ -133,7 +132,6 @@ async def update_master_log(order_id):
     embed.add_field(name="Chef", value=chef, inline=True)
     embed.add_field(name="Deliverer", value=deliverer, inline=True)
     
-    # Use timestamp() for Discord format
     created_ts = int(o['created_at'].timestamp())
     embed.add_field(name="Created", value=f"<t:{created_ts}:R>", inline=True)
 
@@ -168,7 +166,6 @@ def calculate_dynamic_targets(total_volume, staff_count):
     return normal_target, senior_target
 
 def generate_key_string():
-    """Generates a random key like VIP-A1B2-C3D4"""
     def seg(): return ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
     return f"VIP-{seg()}-{seg()}-{seg()}"
 
@@ -452,18 +449,36 @@ async def weekly_quota_check():
     now = get_utc_now()
     if now.weekday() == 6 and now.hour == 23:
         last_run = config_col.find_one({"key": "last_quota_run"})
-        # Ensure we use timezone aware comparison
         if last_run and (now - last_run['date'].replace(tzinfo=datetime.timezone.utc)).total_seconds() < 43200:
             return
         for guild in bot.guilds:
             await run_quota_logic(guild)
         config_col.update_one({"key": "last_quota_run"}, {"$set": {"date": now}}, upsert=True)
 
-# --- 7. NEW COMMANDS (GENERATE CODES & REDEEM) ---
+# --- 7. COMMANDS ---
+
+@bot.tree.command(name="invite", description="Get the invite link for Sugar Rush")
+async def invite(interaction: discord.Interaction):
+    # Permissions required: Create Instant Invite, Send Messages, Embed Links, Attach Files, Read History, Ext Emojis
+    permissions = discord.Permissions(
+        create_instant_invite=True,
+        send_messages=True,
+        embed_links=True,
+        attach_files=True,
+        read_message_history=True,
+        use_external_emojis=True,
+        view_channel=True
+    )
+    url = discord.utils.oauth_url(interaction.client.user.id, permissions=permissions)
+    
+    embed = discord.Embed(title=f"🍩 Invite {BRAND_NAME}", description="Click the button below to add me to your server!", color=BRAND_COLOR)
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label="Invite Me", url=url, style=discord.ButtonStyle.link))
+    
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 @bot.tree.command(name="generate_codes", description="Generate premium codes (Owner Only)")
 async def generate_codes(interaction: discord.Interaction, amount: int):
-    # OWNER ONLY CHECK
     if interaction.user.id != OWNER_ID:
         return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
     
@@ -491,7 +506,6 @@ async def generate_codes(interaction: discord.Interaction, amount: int):
 async def redeem(interaction: discord.Interaction, code: str):
     await interaction.response.defer(ephemeral=True)
     
-    # Atomic Check-and-Set to ensure 1-time use
     code_data = codes_col.find_one_and_update(
         {"code": code, "status": "unused"},
         {"$set": {
@@ -523,8 +537,6 @@ async def redeem(interaction: discord.Interaction, code: str):
 
     await interaction.followup.send(f"💎 **Premium Activated!** Valid for 30 days.", ephemeral=True)
 
-# --- 8. OTHER COMMANDS ---
-
 @bot.tree.command(name="help", description="Show available commands")
 async def help(interaction: discord.Interaction):
     user_roles = [r.id for r in interaction.user.roles]
@@ -540,6 +552,7 @@ async def help(interaction: discord.Interaction):
         "`/rate <id> <1-5>` - Rate a delivered order\n"
         "`/complain <id> <reason>` - Report an issue\n"
         "`/redeem <code>` - Activate Premium\n"
+        "`/invite` - Get bot invite link\n"
         "`/rules` - View server rules"
     )
     embed.add_field(name="🧑‍🍳 Customer Menu", value=customer_cmds, inline=False)
@@ -682,13 +695,6 @@ async def vacation(interaction: discord.Interaction, days: int, reason: str):
     await qc.send(embed=embed, view=view)
     await interaction.response.send_message("✅ Request sent to management.", ephemeral=True)
 
-@bot.tree.command(name="runquota", description="Management: Force run the weekly quota check")
-@commands.has_role(MANAGER_ROLE_ID)
-async def runquota(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    await run_quota_logic(interaction.guild)
-    await interaction.followup.send("✅ Quota check executed. Check the quota log channel.")
-
 @bot.tree.command(name="order", description="Place an order")
 async def order(interaction: discord.Interaction, item: str):
     uid = str(interaction.user.id)
@@ -744,6 +750,16 @@ async def complain(interaction: discord.Interaction, order_id: str, reason: str)
     lc = bot.get_channel(COMPLAINT_CHANNEL_ID)
     if lc: await lc.send(f"🚨 **Complaint** `{order_id}`\nUser: <@{o['user_id']}>\nMsg: {reason}")
     await interaction.response.send_message("Sent to management.", ephemeral=True)
+
+@bot.tree.command(name="rules", description="View rules")
+async def rules(interaction: discord.Interaction):
+    embed = discord.Embed(title=f"🍩 {BRAND_NAME} Rules", color=BRAND_COLOR)
+    embed.add_field(name="1. The Golden Rule", value="**Every order MUST include a donut.**", inline=False)
+    embed.add_field(name="2. Conduct", value="No NSFW.", inline=False)
+    embed.add_field(name="3. Queue", value="1 Active order at a time.", inline=False)
+    embed.add_field(name="4. Quantity", value="**Max of 3 Items per order.**", inline=False)
+    embed.set_footer(text="Violations result in bans. Bans are appealable via Ticket/Email.")
+    await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="orderlist", description="View Queue")
 async def orderlist(interaction: discord.Interaction):
