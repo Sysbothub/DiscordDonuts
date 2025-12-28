@@ -69,6 +69,9 @@ intents.message_content = True
 intents.members = True 
 bot = commands.Bot(command_prefix="/", intents=intents)
 
+# Global flag to prevent double-startup
+bot_has_started = False
+
 # --- 4. HELPER FUNCTIONS ---
 
 def get_utc_now():
@@ -169,7 +172,7 @@ def generate_key_string():
     def seg(): return ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
     return f"VIP-{seg()}-{seg()}-{seg()}"
 
-# --- 5. UI CLASSES (Vacation) ---
+# --- 5. UI CLASSES ---
 
 class VacationEditModal(discord.ui.Modal, title="Edit Vacation Duration"):
     days = discord.ui.TextInput(label="New Duration (Days)", placeholder="Enter number 1-14", min_length=1, max_length=2)
@@ -264,20 +267,42 @@ class VacationView(discord.ui.View):
         if not is_manager(interaction.user): return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
         await interaction.response.send_modal(VacationDenyModal(self.target_user, interaction.message))
 
-# --- 6. EVENTS & TASKS ---
+# --- 6. EVENTS & TASKS (SAFE STARTUP) ---
 
 @bot.event
 async def on_ready():
-    print(f'🍩 {BRAND_NAME} is online as {bot.user}')
-    if not auto_delivery_task.is_running(): auto_delivery_task.start()
-    if not auto_unclaim_task.is_running(): auto_unclaim_task.start()
-    if not check_premium_expiry.is_running(): check_premium_expiry.start()
-    if not weekly_quota_check.is_running(): weekly_quota_check.start()
-    if not check_vacations.is_running(): check_vacations.start()
+    global bot_has_started
+    
+    if bot_has_started:
+        print("🔄 Bot reconnected (Skipping startup logic).")
+        return
+    bot_has_started = True
+
+    print(f'🍩 {BRAND_NAME} is online as {bot.user} (ID: {bot.user.id})')
+    
+    # Start Background Tasks Safely
+    print("⏳ Starting background tasks...")
+    try:
+        if not auto_delivery_task.is_running(): auto_delivery_task.start()
+        if not auto_unclaim_task.is_running(): auto_unclaim_task.start()
+        if not check_premium_expiry.is_running(): check_premium_expiry.start()
+        if not weekly_quota_check.is_running(): weekly_quota_check.start()
+        if not check_vacations.is_running(): check_vacations.start()
+        print("✅ Background tasks running.")
+    except Exception as e:
+        print(f"❌ Error starting tasks: {e}")
+
+    # Sync Commands Safely
+    print("⏳ Syncing commands (This can take up to 2 minutes)...")
     try:
         synced = await bot.tree.sync()
-        print(f"✨ Synced {len(synced)} commands")
-    except Exception as e: print(e)
+        print(f"✨ Successfully synced {len(synced)} commands globally.")
+    except discord.HTTPException as e:
+        print(f"⚠️ Discord Rate Limit (HTTP 429): You are syncing too often. Wait 30m. Error: {e}")
+    except Exception as e:
+        print(f"❌ Failed to sync commands: {e}")
+
+    print(f"🚀 {BRAND_NAME} IS FULLY ONLINE AND READY!")
 
 @tasks.loop(minutes=60)
 async def check_premium_expiry():
@@ -459,7 +484,6 @@ async def weekly_quota_check():
 
 @bot.tree.command(name="invite", description="Get the invite link for Sugar Rush")
 async def invite(interaction: discord.Interaction):
-    # Permissions required: Create Instant Invite, Send Messages, Embed Links, Attach Files, Read History, Ext Emojis
     permissions = discord.Permissions(
         create_instant_invite=True,
         send_messages=True,
@@ -694,6 +718,13 @@ async def vacation(interaction: discord.Interaction, days: int, reason: str):
     view = VacationView(target_user=interaction.user, days=days)
     await qc.send(embed=embed, view=view)
     await interaction.response.send_message("✅ Request sent to management.", ephemeral=True)
+
+@bot.tree.command(name="runquota", description="Management: Force run the weekly quota check")
+@commands.has_role(MANAGER_ROLE_ID)
+async def runquota(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    await run_quota_logic(interaction.guild)
+    await interaction.followup.send("✅ Quota check executed. Check the quota log channel.")
 
 @bot.tree.command(name="order", description="Place an order")
 async def order(interaction: discord.Interaction, item: str):
