@@ -19,7 +19,7 @@ MONGO_URI = os.environ.get("MONGO_URI")
 
 # --- BRANDING ---
 BRAND_NAME = "Sugar Rush"
-BRAND_COLOR = discord.Color.orange()  # Rebranded to Orange
+BRAND_COLOR = discord.Color.orange()
 SUPPORT_EMAIL = "help@sugarrush.gg"
 SUPPORT_SERVER_LINK = "https://discord.gg/ceT3Gqwquj"
 
@@ -29,14 +29,14 @@ DELIVERY_ROLE_ID = 1454877287953469632
 MANAGER_ROLE_ID = 1454876343878549630
 OWNER_ID = 662655499811946536
 
-# Senior Staff & Bypass (REPLACE 0 WITH ACTUAL IDs)
+# Senior Staff & Bypass
 SENIOR_COOK_ROLE_ID = 0
 SENIOR_DELIVERY_ROLE_ID = 0
-QUOTA_BYPASS_ROLE_ID = 1454936082591252534 
+QUOTA_BYPASS_ROLE_ID = 1454936082591252534
 
-# Support Server VIP (REPLACE 0 WITH ACTUAL IDs)
-SUPPORT_SERVER_ID = 1454857011866112063     
-VIP_ROLE_ID = 1454935878408605748           
+# Support Server VIP
+SUPPORT_SERVER_ID = 1454857011866112063
+VIP_ROLE_ID = 1454935878408605748
 
 # --- CHANNEL IDs ---
 COOK_CHANNEL_ID = 1454879418999767122       # Kitchen
@@ -50,7 +50,8 @@ VACATION_CHANNEL_ID = 1454909580894015754   # Vacation Requests
 
 # --- 2. DATABASE CONNECTION ---
 try:
-    cluster = MongoClient(MONGO_URI)
+    # tz_aware=True forces MongoDB to return Timezone Aware dates
+    cluster = MongoClient(MONGO_URI, tz_aware=True)
     db = cluster["patisserie_db"]
     orders_col = db["orders"]
     users_col = db["users"]
@@ -70,6 +71,10 @@ intents.members = True
 bot = commands.Bot(command_prefix="/", intents=intents)
 
 # --- 4. HELPER FUNCTIONS ---
+
+def get_utc_now():
+    """Returns current time in UTC (Timezone Aware)."""
+    return datetime.datetime.now(datetime.timezone.utc)
 
 def is_manager(user):
     has_role = any(r.id == MANAGER_ROLE_ID for r in user.roles)
@@ -127,7 +132,10 @@ async def update_master_log(order_id):
     
     embed.add_field(name="Chef", value=chef, inline=True)
     embed.add_field(name="Deliverer", value=deliverer, inline=True)
-    embed.add_field(name="Created", value=f"<t:{int(o['created_at'].timestamp())}:R>", inline=True)
+    
+    # Use timestamp() for Discord format
+    created_ts = int(o['created_at'].timestamp())
+    embed.add_field(name="Created", value=f"<t:{created_ts}:R>", inline=True)
 
     if 'backup_msg_id' not in o:
         try:
@@ -180,7 +188,7 @@ class VacationEditModal(discord.ui.Modal, title="Edit Vacation Duration"):
             if not 1 <= new_days <= 14:
                 return await interaction.response.send_message("❌ Must be between 1 and 14 days.", ephemeral=True)
             
-            end_date = datetime.datetime.utcnow() + datetime.timedelta(days=new_days)
+            end_date = get_utc_now() + datetime.timedelta(days=new_days)
             vacations_col.update_one(
                 {"user_id": str(self.target_user.id)},
                 {"$set": {"status": "active", "end_date": end_date}},
@@ -229,7 +237,7 @@ class VacationView(discord.ui.View):
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.green, custom_id="vac_approve")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_manager(interaction.user): return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
-        end_date = datetime.datetime.utcnow() + datetime.timedelta(days=self.days)
+        end_date = get_utc_now() + datetime.timedelta(days=self.days)
         vacations_col.update_one(
             {"user_id": str(self.target_user.id)},
             {"$set": {"status": "active", "end_date": end_date}},
@@ -276,7 +284,7 @@ async def on_ready():
 
 @tasks.loop(minutes=60)
 async def check_premium_expiry():
-    now = datetime.datetime.utcnow()
+    now = get_utc_now()
     expired = premium_col.find({"is_vip": True, "expires_at": {"$lt": now}})
     for u in expired:
         premium_col.update_one({"user_id": u['user_id']}, {"$set": {"is_vip": False}, "$unset": {"expires_at": ""}})
@@ -290,7 +298,7 @@ async def check_premium_expiry():
 
 @tasks.loop(minutes=60)
 async def check_vacations():
-    now = datetime.datetime.utcnow()
+    now = get_utc_now()
     expired = vacations_col.find({"status": "active", "end_date": {"$lt": now}})
     for v in expired:
         uid = int(v['user_id'])
@@ -306,7 +314,7 @@ async def check_vacations():
 
 @tasks.loop(minutes=1)
 async def auto_unclaim_task():
-    threshold = datetime.datetime.utcnow() - datetime.timedelta(minutes=4)
+    threshold = get_utc_now() - datetime.timedelta(minutes=4)
     expired = orders_col.find({"status": "claimed", "claimed_at": {"$lt": threshold}})
     cook_channel = bot.get_channel(COOK_CHANNEL_ID)
     for o in expired:
@@ -317,7 +325,7 @@ async def auto_unclaim_task():
 
 @tasks.loop(minutes=1)
 async def auto_delivery_task():
-    threshold = datetime.datetime.utcnow() - datetime.timedelta(minutes=20)
+    threshold = get_utc_now() - datetime.timedelta(minutes=20)
     overdue = orders_col.find({"status": "ready", "ready_at": {"$lt": threshold}})
     for o in overdue:
         img_str = get_images_str(o)
@@ -351,7 +359,6 @@ async def run_quota_logic(guild):
 
     total_cook_volume = sum([users_col.find_one({"user_id": str(m.id)}).get("cook_count_week", 0) 
                              if users_col.find_one({"user_id": str(m.id)}) else 0 for m in cooks])
-    
     total_deliver_volume = sum([users_col.find_one({"user_id": str(m.id)}).get("deliver_count_week", 0) 
                                 if users_col.find_one({"user_id": str(m.id)}) else 0 for m in deliverers])
 
@@ -442,10 +449,11 @@ async def run_quota_logic(guild):
 
 @tasks.loop(hours=1)
 async def weekly_quota_check():
-    now = datetime.datetime.utcnow()
+    now = get_utc_now()
     if now.weekday() == 6 and now.hour == 23:
         last_run = config_col.find_one({"key": "last_quota_run"})
-        if last_run and (now - last_run['date']).total_seconds() < 43200:
+        # Ensure we use timezone aware comparison
+        if last_run and (now - last_run['date'].replace(tzinfo=datetime.timezone.utc)).total_seconds() < 43200:
             return
         for guild in bot.guilds:
             await run_quota_logic(guild)
@@ -469,7 +477,7 @@ async def generate_codes(interaction: discord.Interaction, amount: int):
             "code": new_code,
             "status": "unused",
             "duration_days": 30,
-            "created_at": datetime.datetime.utcnow(),
+            "created_at": get_utc_now(),
             "created_by": str(interaction.user.id)
         })
         generated_codes.append(new_code)
@@ -489,7 +497,7 @@ async def redeem(interaction: discord.Interaction, code: str):
         {"$set": {
             "status": "redeemed",
             "redeemed_by": str(interaction.user.id),
-            "redeemed_at": datetime.datetime.utcnow()
+            "redeemed_at": get_utc_now()
         }},
         return_document=ReturnDocument.AFTER
     )
@@ -497,8 +505,7 @@ async def redeem(interaction: discord.Interaction, code: str):
     if not code_data:
         return await interaction.followup.send("❌ Invalid or used code.", ephemeral=True)
     
-    # Grant Premium (30 Days from NOW)
-    expiry = datetime.datetime.utcnow() + datetime.timedelta(days=30)
+    expiry = get_utc_now() + datetime.timedelta(days=30)
     premium_col.update_one(
         {"user_id": str(interaction.user.id)}, 
         {"$set": {"is_vip": True, "expires_at": expiry, "redeemed_code": code}}, 
@@ -692,7 +699,7 @@ async def order(interaction: discord.Interaction, item: str):
             return await interaction.response.send_message(msg, ephemeral=True)
         ban_expiry = user_data.get("ban_expires_at")
         if ban_expiry:
-            if ban_expiry > datetime.datetime.utcnow():
+            if ban_expiry > get_utc_now():
                 timestamp = int(ban_expiry.timestamp())
                 return await interaction.response.send_message(f"🛑 **Temporary Ban.**\nOrder again <t:{timestamp}:R>.\nAppeal: {SUPPORT_SERVER_LINK}", ephemeral=True)
             else: users_col.update_one({"user_id": uid}, {"$unset": {"ban_expires_at": ""}})
@@ -706,7 +713,7 @@ async def order(interaction: discord.Interaction, item: str):
     orders_col.insert_one({
         "order_id": oid, "user_id": uid, "guild_id": str(interaction.guild.id),
         "channel_id": str(interaction.channel.id), "status": "pending", "item": item,
-        "is_vip": is_vip, "created_at": datetime.datetime.utcnow(), 
+        "is_vip": is_vip, "created_at": get_utc_now(), 
         "chef_name": None, "images": [] 
     })
     await update_master_log(oid)
@@ -738,16 +745,6 @@ async def complain(interaction: discord.Interaction, order_id: str, reason: str)
     if lc: await lc.send(f"🚨 **Complaint** `{order_id}`\nUser: <@{o['user_id']}>\nMsg: {reason}")
     await interaction.response.send_message("Sent to management.", ephemeral=True)
 
-@bot.tree.command(name="rules", description="View rules")
-async def rules(interaction: discord.Interaction):
-    embed = discord.Embed(title=f"🍩 {BRAND_NAME} Rules", color=BRAND_COLOR)
-    embed.add_field(name="1. The Golden Rule", value="**Every order MUST include a donut.**", inline=False)
-    embed.add_field(name="2. Conduct", value="No NSFW.", inline=False)
-    embed.add_field(name="3. Queue", value="1 Active order at a time.", inline=False)
-    embed.add_field(name="4. Quantity", value="**Max of 3 Items per order.**", inline=False)
-    embed.set_footer(text="Violations result in bans. Bans are appealable via Ticket/Email.")
-    await interaction.response.send_message(embed=embed)
-
 @bot.tree.command(name="orderlist", description="View Queue")
 async def orderlist(interaction: discord.Interaction):
     if interaction.channel.id != COOK_CHANNEL_ID and not is_manager(interaction.user):
@@ -771,7 +768,7 @@ async def claim(interaction: discord.Interaction, order_id: str):
     o = orders_col.find_one({"order_id": order_id})
     if not o or o['status'] != 'pending': return await interaction.response.send_message("Cannot claim.", ephemeral=True)
     orders_col.update_one({"order_id": order_id}, 
-                          {"$set": {"status": "claimed", "chef_name": interaction.user.display_name, "claimed_at": datetime.datetime.utcnow()}})
+                          {"$set": {"status": "claimed", "chef_name": interaction.user.display_name, "claimed_at": get_utc_now()}})
     try:
         u = await bot.fetch_user(int(o['user_id']))
         await u.send(f"👨‍🍳 **Update:** Your order `{order_id}` has been claimed by **{interaction.user.display_name}**! Cooking will begin shortly.")
@@ -809,7 +806,7 @@ async def cook(interaction: discord.Interaction, order_id: str, main_image: disc
     users_col.update_one({"user_id": str(interaction.user.id)}, 
                          {"$inc": {"cook_count_week": 1, "cook_count_total": 1}}, upsert=True)
     
-    finish_time = int((datetime.datetime.utcnow() + datetime.timedelta(minutes=3)).timestamp())
+    finish_time = int((get_utc_now() + datetime.timedelta(minutes=3)).timestamp())
     try:
         u = await bot.fetch_user(int(o['user_id']))
         await u.send(f"🍳 **Cooking Started!** Your order `{order_id}` is on the stove. Ready <t:{finish_time}:R>.")
@@ -818,7 +815,7 @@ async def cook(interaction: discord.Interaction, order_id: str, main_image: disc
     await update_master_log(order_id)
     await interaction.response.send_message(f"👨‍🍳 Cooking `{order_id}`... (3m)")
     await asyncio.sleep(180)
-    orders_col.update_one({"order_id": order_id}, {"$set": {"status": "ready", "ready_at": datetime.datetime.utcnow()}})
+    orders_col.update_one({"order_id": order_id}, {"$set": {"status": "ready", "ready_at": get_utc_now()}})
     
     try:
         u = await bot.fetch_user(int(o['user_id']))
@@ -949,11 +946,11 @@ async def apply_warning_logic(interaction, order, reason, cmd_type="warn"):
     ban_msg = ""
     
     if w == 3:
-        expiry = datetime.datetime.utcnow() + datetime.timedelta(days=7)
+        expiry = get_utc_now() + datetime.timedelta(days=7)
         users_col.update_one({"user_id": uid}, {"$set": {"ban_expires_at": expiry}})
         ban_msg = "\n⏳ **7-DAY BAN APPLIED**"
     elif w == 6:
-        expiry = datetime.datetime.utcnow() + datetime.timedelta(days=30)
+        expiry = get_utc_now() + datetime.timedelta(days=30)
         users_col.update_one({"user_id": uid}, {"$set": {"ban_expires_at": expiry}})
         ban_msg = "\n⏳ **30-DAY BAN APPLIED**"
     elif w >= 9:
