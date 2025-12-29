@@ -125,10 +125,25 @@ const client = new Client({
 });
 
 // --- 4. HELPER FUNCTIONS ---
-const isStaff = (member) => {
-    if (!member) return false;
-    const r = member.roles.cache;
-    return r.has(ROLES.COOK) || r.has(ROLES.DELIVERY) || r.has(ROLES.MANAGER) || member.id === ROLES.OWNER;
+const getGlobalPerms = async (userId) => {
+    if (userId === ROLES.OWNER) return { isStaff: true, isManager: true, isCook: true, isDelivery: true, isOwner: true };
+    try {
+        const supportGuild = client.guilds.cache.get(SUPPORT_SERVER_ID);
+        if (!supportGuild) return { isStaff: false, isManager: false, isOwner: false }; 
+        const member = await supportGuild.members.fetch(userId);
+        const isCook = member.roles.cache.has(ROLES.COOK);
+        const isDelivery = member.roles.cache.has(ROLES.DELIVERY);
+        const isManager = member.roles.cache.has(ROLES.MANAGER);
+        return { 
+            isStaff: isCook || isDelivery || isManager, 
+            isManager: isManager, 
+            isCook: isCook, 
+            isDelivery: isDelivery,
+            isOwner: false
+        };
+    } catch (e) {
+        return { isStaff: false, isManager: false, isOwner: false };
+    }
 };
 
 const createEmbed = (title, description, color = BRAND_COLOR, fields = []) => {
@@ -235,7 +250,7 @@ client.once('clientReady', async () => {
 async function checkTasks() {
     const now = new Date();
 
-    // 1. Auto Delivery Logic (20 Minutes)
+    // 1. Auto Delivery Logic
     const threshold = new Date(now - 20 * 60000);
     const overdue = await Order.find({ status: 'ready', ready_at: { $lt: threshold } });
     
@@ -245,8 +260,8 @@ async function checkTasks() {
             if (guild) {
                 const channel = guild.channels.cache.get(o.channel_id);
                 if (channel) {
-                    const embed = createEmbed("🤖 Auto-Delivery", `**Chef:** ${o.chef_name}\n\n*This order was automatically delivered to ensure prompt service.*`, BRAND_COLOR);
-                    embed.setImage(o.images[0]);
+                    const embed = createEmbed("🤖 Auto-Delivery", `**Chef:** ${o.chef_name}\n\n*This order was automatically delivered because it waited over 20 minutes.*`, BRAND_COLOR);
+                    if(o.images && o.images.length > 0) embed.setImage(o.images[0]);
                     
                     await channel.send({ content: `<@${o.user_id}>`, embeds: [embed] });
                     if(o.images.length > 1) await channel.send({ files: o.images.slice(1) });
@@ -260,15 +275,10 @@ async function checkTasks() {
         } catch(e) { console.error("Auto-Deliver Failed:", e); }
     }
 
-    // 2. VIP Expiry Monitor (The Logic for ID-based VIP)
+    // 2. VIP Expiry Monitor
     const expiredVips = await PremiumUser.find({ is_vip: true, expires_at: { $lt: now } });
     for (const v of expiredVips) {
-        // Reset DB Status (Source of Truth)
-        v.is_vip = false;
-        v.expires_at = null;
-        await v.save();
-        
-        // Try to remove role (Side Effect)
+        v.is_vip = false; v.expires_at = null; await v.save();
         try {
             const supportGuild = client.guilds.cache.get(SUPPORT_SERVER_ID);
             if (supportGuild) {
@@ -278,7 +288,7 @@ async function checkTasks() {
         } catch (e) {}
     }
 
-    // 3. Weekly Quota (Sunday 23:00 UTC)
+    // 3. Weekly Quota
     if (now.getUTCDay() === 0 && now.getUTCHours() === 23) {
         const lastRun = await Config.findOne({ key: 'last_quota_run' });
         const twelveHours = 12 * 60 * 60 * 1000;
@@ -369,6 +379,151 @@ async function runQuotaLogic(guild) {
 
 // --- 7. INTERACTIONS ---
 client.on('interactionCreate', async interaction => {
+    const perms = await getGlobalPerms(interaction.user.id);
+
+    // --- 7A. CHANNEL & SERVER RESTRICTIONS ---
+    if (interaction.isChatInputCommand()) {
+        const { commandName } = interaction;
+
+        // 1. KITCHEN CHANNEL LOCK (Claim, Cook) - Unless Manager/Owner
+        if (['claim', 'cook'].includes(commandName)) {
+            if (interaction.channelId !== CHANNELS.COOK && !perms.isManager && !perms.isOwner) {
+                return interaction.reply({ embeds: [createEmbed("❌ Wrong Channel", `Please use this command in <#${CHANNELS.COOK}>.`, ERROR_COLOR)], ephemeral: true });
+            }
+        }
+
+        // 2. DELIVERY CHANNEL LOCK (Deliver) - Unless Manager/Owner
+        if (commandName === 'deliver') {
+            if (interaction.channelId !== CHANNELS.DELIVERY && !perms.isManager && !perms.isOwner) {
+                return interaction.reply({ embeds: [createEmbed("❌ Wrong Channel", `Please use this command in <#${CHANNELS.DELIVERY}>.`, ERROR_COLOR)], ephemeral: true });
+            }
+        }
+
+        // 3. SUPPORT SERVER LOCK (All other staff commands)
+        const restrictedCommands = ['warn', 'fdo', 'unban', 'vacation', 'quota', 'stats', 'runquota', 'addvip', 'removevip', 'generate_codes', 'setscript', 'orderlist'];
+        if (restrictedCommands.includes(commandName)) {
+            if (interaction.guildId !== SUPPORT_SERVER_ID && !perms.isOwner) {
+                return interaction.reply({ embeds: [createEmbed("❌ Restricted", "This command can only be used in the **Support Server**.", ERROR_COLOR)], ephemeral: true });
+            }
+        }
+        
+        // 4. OWNER LOCK (Explicit check for strict owner commands)
+        if (['addvip', 'removevip', 'generate_codes'].includes(commandName)) {
+            if (!perms.isOwner) {
+                return interaction.reply({ embeds: [createEmbed("❌ Restricted", "This command is restricted to the **Bot Owner**.", ERROR_COLOR)], ephemeral: true });
+            }
+        }
+    }
+
+    // --- 7B. BUTTON & MODAL HANDLING (VACATION) ---
+    if (interaction.isButton()) {
+        if (!perms.isManager && !perms.isOwner) return interaction.reply({ embeds: [createEmbed("❌ Access Denied", "Managers only.", ERROR_COLOR)], ephemeral: true });
+        
+        const [action, userId, daysStr] = interaction.customId.split('_');
+        const days = parseInt(daysStr);
+
+        if (action === 'vacApprove') {
+            const endDate = new Date();
+            endDate.setDate(endDate.getDate() + days);
+
+            await Vacation.findOneAndUpdate(
+                { user_id: userId },
+                { status: 'active', end_date: endDate },
+                { upsert: true }
+            );
+
+            const supportGuild = client.guilds.cache.get(SUPPORT_SERVER_ID);
+            if(supportGuild) {
+                const target = await supportGuild.members.fetch(userId).catch(() => null);
+                if (target) target.roles.add(ROLES.BYPASS).catch(() => {});
+            }
+
+            const embed = EmbedBuilder.from(interaction.message.embeds[0])
+                .setColor(SUCCESS_COLOR)
+                .setFooter({ text: `Approved by ${interaction.user.username}` });
+
+            await interaction.message.edit({ embeds: [embed], components: [] });
+            await interaction.reply({ embeds: [createEmbed("✅ Approved", `Vacation approved for ${days} days.`, SUCCESS_COLOR)], ephemeral: true });
+            
+            try { 
+                const u = await client.users.fetch(userId);
+                u.send({ embeds: [createEmbed("🌴 Vacation Approved", `Your request for ${days} days has been approved! Enjoy your break.`, SUCCESS_COLOR)] }); 
+            } catch(e){}
+        }
+
+        if (action === 'vacEdit') {
+            const modal = new ModalBuilder().setCustomId(`vacModalEdit_${userId}`).setTitle("Edit Vacation Duration");
+            const input = new TextInputBuilder().setCustomId('newDays').setLabel('New Duration (Days)').setStyle(TextInputStyle.Short);
+            modal.addComponents(new ActionRowBuilder().addComponents(input));
+            await interaction.showModal(modal);
+        }
+
+        if (action === 'vacDeny') {
+            const modal = new ModalBuilder().setCustomId(`vacModalDeny_${userId}`).setTitle("Deny Vacation Request");
+            const input = new TextInputBuilder().setCustomId('denyReason').setLabel('Reason for Denial').setStyle(TextInputStyle.Paragraph);
+            modal.addComponents(new ActionRowBuilder().addComponents(input));
+            await interaction.showModal(modal);
+        }
+        return;
+    }
+
+    if (interaction.isModalSubmit()) {
+        const [action, userId] = interaction.customId.split('_');
+
+        if (action === 'vacModalEdit') {
+            const newDays = parseInt(interaction.fields.getTextInputValue('newDays'));
+            if (isNaN(newDays) || newDays < 1 || newDays > 14) return interaction.reply({ embeds: [createEmbed("❌ Error", "Days must be 1-14.", ERROR_COLOR)], ephemeral: true });
+
+            const endDate = new Date();
+            endDate.setDate(endDate.getDate() + newDays);
+
+            await Vacation.findOneAndUpdate(
+                { user_id: userId },
+                { status: 'active', end_date: endDate },
+                { upsert: true }
+            );
+
+            const supportGuild = client.guilds.cache.get(SUPPORT_SERVER_ID);
+            if(supportGuild) {
+                const target = await supportGuild.members.fetch(userId).catch(() => null);
+                if (target) target.roles.add(ROLES.BYPASS).catch(() => {});
+            }
+
+            const oldEmbed = interaction.message.embeds[0];
+            const embed = EmbedBuilder.from(oldEmbed)
+                .setColor(SUCCESS_COLOR)
+                .setDescription(oldEmbed.description.replace(/Duration: \d+ Days/, `Duration: ${newDays} Days (Edited)`))
+                .setFooter({ text: `Approved (Edited) by ${interaction.user.username}` });
+
+            await interaction.message.edit({ embeds: [embed], components: [] });
+            await interaction.reply({ embeds: [createEmbed("✅ Approved & Edited", `Vacation set to ${newDays} days.`, SUCCESS_COLOR)], ephemeral: true });
+            
+            try { 
+                const u = await client.users.fetch(userId);
+                u.send({ embeds: [createEmbed("🌴 Vacation Approved (Edited)", `Your request was modified and approved for ${newDays} days.`, SUCCESS_COLOR)] }); 
+            } catch(e){}
+        }
+
+        if (action === 'vacModalDeny') {
+            const reason = interaction.fields.getTextInputValue('denyReason');
+            
+            const oldEmbed = interaction.message.embeds[0];
+            const embed = EmbedBuilder.from(oldEmbed)
+                .setColor(ERROR_COLOR)
+                .addFields({ name: "Denial Reason", value: reason })
+                .setFooter({ text: `Denied by ${interaction.user.username}` });
+
+            await interaction.message.edit({ embeds: [embed], components: [] });
+            await interaction.reply({ embeds: [createEmbed("❌ Request Denied", "User has been notified.", SUCCESS_COLOR)], ephemeral: true });
+            
+            try { 
+                const u = await client.users.fetch(userId);
+                u.send({ embeds: [createEmbed("❌ Vacation Denied", `Reason: ${reason}`, ERROR_COLOR)] }); 
+            } catch(e){}
+        }
+        return;
+    }
+
     if (!interaction.isChatInputCommand()) return;
     const { commandName } = interaction;
 
@@ -383,7 +538,6 @@ client.on('interactionCreate', async interaction => {
         const active = await Order.findOne({ user_id: interaction.user.id, status: { $in: ['pending', 'claimed', 'cooking', 'ready'] } });
         if (active) return interaction.reply({ embeds: [createEmbed("❌ Order Failed", "You already have an active order in the queue.", ERROR_COLOR)], ephemeral: true });
 
-        // DATABASE CHECK FOR VIP (ID BASED)
         const vipUser = await PremiumUser.findOne({ user_id: interaction.user.id, is_vip: true });
         const isVip = !!vipUser;
 
@@ -405,7 +559,7 @@ client.on('interactionCreate', async interaction => {
 
     // --- CLAIM ---
     if (commandName === 'claim') {
-        if (!isStaff(interaction.member)) return interaction.reply({ embeds: [createEmbed("❌ Access Denied", "Staff only.", ERROR_COLOR)], ephemeral: true });
+        if (!perms.isStaff) return interaction.reply({ embeds: [createEmbed("❌ Access Denied", "Staff only.", ERROR_COLOR)], ephemeral: true });
         const oid = interaction.options.getString('id');
         const order = await Order.findOne({ order_id: oid });
         if(!order || order.status !== 'pending') return interaction.reply({ embeds: [createEmbed("❌ Invalid Order", "Order not found or already claimed.", ERROR_COLOR)], ephemeral: true });
@@ -423,9 +577,9 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply({ embeds: [createEmbed("👨‍🍳 Claimed", `You have claimed order \`${oid}\`. You have 4 minutes to cook!`, SUCCESS_COLOR)] });
     }
 
-    // --- COOK (WITH TIMER) ---
+    // --- COOK ---
     if (commandName === 'cook') {
-        if (!isStaff(interaction.member)) return interaction.reply({ embeds: [createEmbed("❌ Access Denied", "Staff only.", ERROR_COLOR)], ephemeral: true });
+        if (!perms.isStaff) return interaction.reply({ embeds: [createEmbed("❌ Access Denied", "Staff only.", ERROR_COLOR)], ephemeral: true });
         const oid = interaction.options.getString('id');
         const img1 = interaction.options.getAttachment('image');
         const img2 = interaction.options.getAttachment('image2');
@@ -476,7 +630,7 @@ client.on('interactionCreate', async interaction => {
 
     // --- DELIVER ---
     if (commandName === 'deliver') {
-        if (!isStaff(interaction.member)) return interaction.reply({ embeds: [createEmbed("❌ Access Denied", "Staff only.", ERROR_COLOR)], ephemeral: true });
+        if (!perms.isStaff) return interaction.reply({ embeds: [createEmbed("❌ Access Denied", "Staff only.", ERROR_COLOR)], ephemeral: true });
         const oid = interaction.options.getString('id');
         const order = await Order.findOne({ order_id: oid });
         if(!order || order.status !== 'ready') return interaction.reply({ embeds: [createEmbed("❌ Invalid Order", "Order not ready for delivery.", ERROR_COLOR)], ephemeral: true });
@@ -486,25 +640,55 @@ client.on('interactionCreate', async interaction => {
         const guild = client.guilds.cache.get(order.guild_id);
         const channel = guild?.channels.cache.get(order.channel_id);
         
+        let invite = null;
         if(channel) {
-            const embed = createEmbed("🚴 Order Delivered", `**Chef:** ${order.chef_name}\n**Driver:** ${interaction.user.username}\n\n**Message:**\n${script}`, BRAND_COLOR);
-            embed.setImage(order.images[0]);
-            
-            await channel.send({ content: `<@${order.user_id}>`, embeds: [embed] });
-            if(order.images.length > 1) await channel.send({ files: order.images.slice(1) });
+            try { invite = await channel.createInvite({ maxAge: 300, maxUses: 1 }); } catch(e) {}
+        }
 
-            order.status = 'delivered'; await order.save();
-            await User.findOneAndUpdate({ user_id: interaction.user.id }, { $inc: { deliver_count_week: 1, deliver_count_total: 1 } }, { upsert: true });
-            updateMasterLog(oid);
-            await interaction.reply({ embeds: [createEmbed("✅ Delivered", `Order \`${oid}\` has been delivered successfully.`, SUCCESS_COLOR)], ephemeral: true });
+        if (invite) {
+            try {
+                const deliveryMsg = `**Chef:** ${order.chef_name}\n**Driver:** ${interaction.user.username}\n\n${script}`;
+                await interaction.user.send({
+                    content: `🚴 **Delivery Instructions for Order #${oid}**\n\n1. **Join Server:** ${invite.url}\n2. **Paste this Message:**\n\`\`\`\n${deliveryMsg}\n\`\`\`\n*(Don't forget to attach the images below!)*`,
+                    files: order.images
+                });
+                
+                order.status = 'delivered'; 
+                order.deliverer_id = interaction.user.id;
+                await order.save();
+                
+                await User.findOneAndUpdate({ user_id: interaction.user.id }, { $inc: { deliver_count_week: 1, deliver_count_total: 1 } }, { upsert: true });
+                updateMasterLog(oid);
+                
+                await interaction.reply({ embeds: [createEmbed("✅ Delivery Started", "Check your DMs for the invite link and script!", SUCCESS_COLOR)], ephemeral: true });
+            } catch (err) {
+                await interaction.reply({ embeds: [createEmbed("❌ DM Failed", "Please open your DMs so I can send you the invite.", ERROR_COLOR)], ephemeral: true });
+            }
         } else {
-            await interaction.reply({ embeds: [createEmbed("❌ Delivery Failed", "Could not reach the customer's channel.", ERROR_COLOR)], ephemeral: true });
+            if(channel) {
+                const embed = createEmbed("🚴 Order Delivered", `**Chef:** ${order.chef_name}\n**Driver:** ${interaction.user.username}\n\n**Message:**\n${script}`, BRAND_COLOR);
+                if(order.images && order.images.length > 0) embed.setImage(order.images[0]);
+                
+                await channel.send({ content: `<@${order.user_id}>`, embeds: [embed] });
+                if(order.images.length > 1) await channel.send({ files: order.images.slice(1) });
+
+                order.status = 'delivered'; 
+                order.deliverer_id = interaction.user.id;
+                await order.save();
+                
+                await User.findOneAndUpdate({ user_id: interaction.user.id }, { $inc: { deliver_count_week: 1, deliver_count_total: 1 } }, { upsert: true });
+                updateMasterLog(oid);
+                
+                await interaction.reply({ embeds: [createEmbed("⚠️ Invite Failed", "I couldn't create an invite, so I delivered the order for you.", BRAND_COLOR)], ephemeral: true });
+            } else {
+                await interaction.reply({ embeds: [createEmbed("❌ Delivery Failed", "Could not reach the customer's channel.", ERROR_COLOR)], ephemeral: true });
+            }
         }
     }
 
     // --- QUOTA ---
     if (commandName === 'quota') {
-        if (!isStaff(interaction.member)) return interaction.reply({ embeds: [createEmbed("❌ Access Denied", "Staff only.", ERROR_COLOR)], ephemeral: true });
+        if (!perms.isStaff) return interaction.reply({ embeds: [createEmbed("❌ Access Denied", "Staff only.", ERROR_COLOR)], ephemeral: true });
         
         const guild = interaction.guild;
         const cookRole = guild.roles.cache.get(ROLES.COOK);
@@ -521,17 +705,15 @@ client.on('interactionCreate', async interaction => {
         const dTarget = calculateTargets(totalDel, deliverers);
 
         const u = await User.findOne({ user_id: interaction.user.id }) || {};
-        const isCook = interaction.member.roles.cache.has(ROLES.COOK);
-        const isDel = interaction.member.roles.cache.has(ROLES.DELIVERY);
         
         let desc = "";
-        if (isCook) {
-            const target = interaction.member.roles.cache.has(ROLES.SENIOR_COOK) ? cTarget.senior : cTarget.norm;
+        if (perms.isCook) {
+            const target = cTarget.norm; 
             const status = (u.cook_count_week >= target) ? "✅ On Track" : "⚠️ Behind";
             desc += `👨‍🍳 **Cooking:** ${u.cook_count_week || 0} / ${target} (${status})\n`;
         }
-        if (isDel) {
-            const target = interaction.member.roles.cache.has(ROLES.SENIOR_DELIVERY) ? dTarget.senior : dTarget.norm;
+        if (perms.isDelivery) {
+            const target = dTarget.norm;
             const status = (u.deliver_count_week >= target) ? "✅ On Track" : "⚠️ Behind";
             desc += `🚴 **Delivery:** ${u.deliver_count_week || 0} / ${target} (${status})\n`;
         }
@@ -541,7 +723,7 @@ client.on('interactionCreate', async interaction => {
 
     // --- STATS ---
     if (commandName === 'stats') {
-        if (!isStaff(interaction.member)) return interaction.reply({ embeds: [createEmbed("❌ Access Denied", "Staff only.", ERROR_COLOR)], ephemeral: true });
+        if (!perms.isStaff) return interaction.reply({ embeds: [createEmbed("❌ Access Denied", "Staff only.", ERROR_COLOR)], ephemeral: true });
         const target = interaction.options.getUser('user') || interaction.user;
         const u = await User.findOne({ user_id: target.id }) || {};
         const ratedOrders = await Order.find({ deliverer_id: target.id, rating: { $exists: true } });
@@ -632,13 +814,13 @@ client.on('interactionCreate', async interaction => {
         const oid = interaction.options.getString('id');
         const order = await Order.findOne({ order_id: oid });
         if(!order || order.status !== 'claimed') return interaction.reply({ embeds: [createEmbed("❌ Error", "Order not claimed.", ERROR_COLOR)], ephemeral: true });
-        if(order.chef_name !== interaction.user.username && !isManager(interaction.member)) return interaction.reply({ embeds: [createEmbed("❌ Error", "You did not claim this order.", ERROR_COLOR)], ephemeral: true });
+        if(order.chef_name !== interaction.user.username && !perms.isManager) return interaction.reply({ embeds: [createEmbed("❌ Error", "You did not claim this order.", ERROR_COLOR)], ephemeral: true });
         order.status = 'pending'; order.chef_name = null; await order.save(); updateMasterLog(oid); 
         await interaction.reply({ embeds: [createEmbed("🔓 Unclaimed", `Order \`${oid}\` has been released.`, SUCCESS_COLOR)] });
     }
 
     if (commandName === 'warn' || commandName === 'fdo') {
-        if(!isManager(interaction.member)) return interaction.reply({ embeds: [createEmbed("❌ Access Denied", "Managers only.", ERROR_COLOR)], ephemeral: true });
+        if(!perms.isManager) return interaction.reply({ embeds: [createEmbed("❌ Access Denied", "Managers only.", ERROR_COLOR)], ephemeral: true });
         const oid = interaction.options.getString('id'); const reason = interaction.options.getString('reason');
         const order = await Order.findOne({ order_id: oid }); if(!order) return interaction.reply({ embeds: [createEmbed("❌ Error", "Invalid ID.", ERROR_COLOR)], ephemeral: true });
         order.status = commandName === 'fdo' ? 'cancelled_fdo' : 'cancelled_warn'; await order.save(); updateMasterLog(oid);
@@ -651,7 +833,7 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (commandName === 'runquota') {
-        if(!interaction.member.roles.cache.has(ROLES.MANAGER) && interaction.user.id !== ROLES.OWNER) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Managers only.", ERROR_COLOR)], ephemeral: true });
+        if(!perms.isManager) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Managers only.", ERROR_COLOR)], ephemeral: true });
         await interaction.deferReply({ ephemeral: true }); await runQuotaLogic(interaction.guild); 
         await interaction.editReply({ embeds: [createEmbed("✅ Quota Run", "Weekly quota check forced successfully.", SUCCESS_COLOR)] });
     }
@@ -675,21 +857,26 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (commandName === 'unban') {
-        if(!isManager(interaction.member)) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Managers only.", ERROR_COLOR)], ephemeral: true });
+        if(!perms.isManager) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Managers only.", ERROR_COLOR)], ephemeral: true });
         const target = interaction.options.getUser('user');
         await User.findOneAndUpdate({ user_id: target.id }, { is_banned: 0, warnings: 0 });
         await interaction.reply({ embeds: [createEmbed("✅ Unbanned", `${target.username} is no longer banned.`, SUCCESS_COLOR)] });
     }
 
     if (commandName === 'vacation') {
-        if (!isStaff(interaction.member)) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Staff only.", ERROR_COLOR)], ephemeral: true });
+        if (!perms.isStaff) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Staff only.", ERROR_COLOR)], ephemeral: true });
         const days = interaction.options.getInteger('days'); const reason = interaction.options.getString('reason');
         if (days < 1 || days > 14) return interaction.reply({ embeds: [createEmbed("❌ Error", "Days must be 1-14.", ERROR_COLOR)], ephemeral: true });
         
         const channel = client.channels.cache.get(CHANNELS.VACATION);
         if(channel) {
             const embed = createEmbed("🌴 Vacation Request", `**Staff:** <@${interaction.user.id}>\n**Duration:** ${days} Days\n**Reason:** ${reason}`, 0x1ABC9C);
-            channel.send({ embeds: [embed] });
+            const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId(`vacApprove_${interaction.user.id}_${days}`).setLabel('Approve').setStyle(ButtonStyle.Success),
+                new ButtonBuilder().setCustomId(`vacEdit_${interaction.user.id}`).setLabel('Edit Duration').setStyle(ButtonStyle.Primary),
+                new ButtonBuilder().setCustomId(`vacDeny_${interaction.user.id}`).setLabel('Deny').setStyle(ButtonStyle.Danger)
+            );
+            channel.send({ embeds: [embed], components: [row] });
         }
         await interaction.reply({ embeds: [createEmbed("✅ Request Sent", "Management will review your request.", SUCCESS_COLOR)] });
     }
