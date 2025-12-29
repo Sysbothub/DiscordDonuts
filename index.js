@@ -2,18 +2,21 @@
  * ============================================================================
  * SUGAR RUSH - MASTER DISCORD AUTOMATION INFRASTRUCTURE
  * ============================================================================
- * * VERSION: 76.0.0 (RANK-BASED QUOTA LOGIC ADDED)
+ * * VERSION: 82.0.0 (QUEUE RESURRECTION & LIST OPTIMIZATION)
  * * ----------------------------------------------------------------------------
- * 🍩 QUOTA SYSTEM UPDATES:
- * - Trainee (Cook/Delivery): Fixed Target = 5.
- * - Senior (Cook/Delivery): Target = 50% of Global Quota.
- * - Standard Staff: Target = 100% of Global Quota.
- * - Vacation: Exempt.
+ * 🍩 LIST LOGIC UPDATE:
+ * 1. /orderlist: Shows 'pending'. Sorted: Super > VIP > Oldest.
+ * 2. /deliverylist: Shows 'ready'. Sorted: Super > VIP > Oldest.
+ * * 🍩 FAILURE RECOVERY:
+ * - If a courier TIMEOUTS (5m) or LEAVES server during delivery:
+ * - Order status resets to 'ready'.
+ * - Order reappears in /deliverylist for others to claim.
  * ----------------------------------------------------------------------------
  * 🍩 CORE SPECS:
  * - Economy: 100/50 (Std) | 150/75 (Super).
- * - Priority Queues: Super > VIP > Standard.
- * - Smart Dispatch: Invite -> Auto-Delivery Fallback.
+ * - Quota: Trainee(5), Senior(50%), Std(100%).
+ * - Discipline: 3/6/9 Strikes.
+ * - Visuals: Super(Red), VIP(Gold), Std(Orange).
  * ============================================================================
  */
 
@@ -46,17 +49,17 @@ const CONF_HQ_ID = '1454857011866112063';
 const CONF_STORE = "https://donuts.sell.app/";
 const CONF_SUPPORT_SERVER = "https://discord.gg/Q4DsEbJzBJ";
 
-// ROLES (PLEASE UPDATE THE NEW IDs)
+// ROLES
 const ROLE_COOK = '1454877400729911509';
 const ROLE_DELIVERY = '1454877287953469632';
 const ROLE_MANAGER = '1454876343878549630';
 const ROLE_QUOTA_EXEMPT = '1454936082591252534';
 
-// NEW ROLES (Add your IDs here)
-const ROLE_TRAINEE_COOK = 'REPLACE_WITH_TRAINEE_COOK_ID';
-const ROLE_TRAINEE_DELIVERY = 'REPLACE_WITH_TRAINEE_DELIVERY_ID';
-const ROLE_SENIOR_COOK = 'REPLACE_WITH_SENIOR_COOK_ID';
-const ROLE_SENIOR_DELIVERY = 'REPLACE_WITH_SENIOR_DELIVERY_ID';
+// QUOTA RANKS (Replace with actual IDs)
+const ROLE_TRAINEE_COOK = 'REPLACE_ID';
+const ROLE_TRAINEE_DELIVERY = 'REPLACE_ID';
+const ROLE_SENIOR_COOK = 'REPLACE_ID';
+const ROLE_SENIOR_DELIVERY = 'REPLACE_ID';
 
 // CHANNELS
 const CHAN_COOK = '1454879418999767122';
@@ -106,6 +109,7 @@ const OrderSchema = new mongoose.Schema({
     chef_name: String,
     chef_id: String,
     deliverer_id: String,
+    delivery_started_at: Date, 
     ready_at: Date,
     images: [String],
     backup_msg_id: String
@@ -227,14 +231,13 @@ async function applyWarningLogic(user) {
     return punishment;
 }
 
-// --- RANK-BASED QUOTA LOGIC ---
+// --- QUOTA ENGINE ---
 async function executeQuotaRun(interaction) {
     await interaction.deferReply();
     const users = await User.find({ $or: [{ cook_count_week: { $gt: 0 } }, { deliver_count_week: { $gt: 0 } }] });
     const totalDeliveries = users.reduce((acc, u) => acc + u.deliver_count_week, 0);
     const totalDishes = users.reduce((acc, u) => acc + u.cook_count_week, 0);
     
-    // Calculate Standard Global Quota
     const activeStaffCount = Math.max(1, users.length);
     let globalQuota = Math.ceil((totalDishes + totalDeliveries) / activeStaffCount);
     if (globalQuota < 5) globalQuota = 5;
@@ -253,27 +256,16 @@ async function executeQuotaRun(interaction) {
         try {
             const member = await supportGuild.members.fetch(u.user_id);
             const roles = member.roles.cache;
-
-            // Logic Tree for Quota Assignment
-            if (roles.has(ROLE_QUOTA_EXEMPT)) {
-                isExempt = true;
-            } else if (roles.has(ROLE_TRAINEE_COOK) || roles.has(ROLE_TRAINEE_DELIVERY)) {
-                quotaTarget = 5; // Trainee Fixed
-            } else if (roles.has(ROLE_SENIOR_COOK) || roles.has(ROLE_SENIOR_DELIVERY)) {
-                quotaTarget = Math.ceil(globalQuota / 2); // Senior 50%
-            }
-        } catch (e) {
-            // User left server, keep standard quota
-        }
+            if (roles.has(ROLE_QUOTA_EXEMPT)) isExempt = true;
+            else if (roles.has(ROLE_TRAINEE_COOK) || roles.has(ROLE_TRAINEE_DELIVERY)) quotaTarget = 5;
+            else if (roles.has(ROLE_SENIOR_COOK) || roles.has(ROLE_SENIOR_DELIVERY)) quotaTarget = Math.ceil(globalQuota / 2);
+        } catch (e) {}
 
         const totalWork = u.cook_count_week + u.deliver_count_week;
-        
         if (!isExempt && totalWork < quotaTarget) {
             u.warnings += 1;
             failCount++;
         }
-        
-        // Reset
         u.cook_count_week = 0;
         u.deliver_count_week = 0;
         await u.save();
@@ -282,8 +274,7 @@ async function executeQuotaRun(interaction) {
     const embed = createEmbed("📊 Weekly Quota Audit", `**Global Target:** ${globalQuota}\n**Failed:** ${failCount}`, COLOR_MAIN);
     embed.addFields(
         { name: "👨‍🍳 Top Chefs", value: topCooks.map((u, i) => `${i+1}. <@${u.user_id}> (${u.cook_count_week})`).join('\n') || "None" },
-        { name: "🚴 Top Couriers", value: topCouriers.map((u, i) => `${i+1}. <@${u.user_id}> (${u.deliver_count_week})`).join('\n') || "None" },
-        { name: "ℹ️ Logic", value: "Trainee: 5 | Senior: 50% | Std: 100%" }
+        { name: "🚴 Top Couriers", value: topCouriers.map((u, i) => `${i+1}. <@${u.user_id}> (${u.deliver_count_week})`).join('\n') || "None" }
     );
     client.channels.cache.get(CHAN_QUOTA)?.send({ content: "@here 📢 **WEEKLY AUDIT**", embeds: [embed] });
     return interaction.editReply({ content: "✅ Quota Run Successful.", embeds: [embed] });
@@ -299,7 +290,7 @@ const client = new Client({
 });
 
 client.once('ready', async () => {
-    console.log(`[SYSTEM] Sugar Rush v76.0.0 Online.`);
+    console.log(`[SYSTEM] Sugar Rush v82.0.0 Online.`);
     await mongoose.connect(CONF_MONGO);
     client.user.setPresence({ activities: [{ name: '/order | Sugar Rush', type: ActivityType.Playing }], status: 'online' });
     setInterval(runOrderFailsafe, 60000);
@@ -313,7 +304,7 @@ async function runOrderFailsafe() {
             const guild = client.guilds.cache.get(o.guild_id);
             const chan = guild?.channels.cache.get(o.channel_id);
             if (chan) {
-                const embed = createEmbed("🍩 Auto-Dispatch System", "Order finalized by HQ protocols.", COLOR_MAIN);
+                const embed = createEmbed("🍩 Auto-Dispatch System", "Order finalized by HQ backup (20m Timeout).", COLOR_MAIN);
                 if (o.images?.length > 0) embed.setImage(o.images[0]);
                 await chan.send({ content: `<@${o.user_id}>`, embeds: [embed] });
                 o.status = 'delivered'; o.deliverer_id = 'SYSTEM_FAILSAFE'; await o.save();
@@ -328,23 +319,86 @@ async function runOrderFailsafe() {
 // ============================================================================
 
 client.on('interactionCreate', async (interaction) => {
-    if (!interaction.isChatInputCommand()) return;
-
+    
+    // --- BUTTON HANDLERS ---
     if (interaction.isButton()) {
-        const perms = await checkPermissions(interaction.user.id);
-        if (!perms.isManager) return interaction.reply({ content: "Unauthorized.", ephemeral: true });
-        
-        const [action, uid, days] = interaction.customId.split('_');
-        if (action === 'approve') {
-            const guild = client.guilds.cache.get(CONF_HQ_ID);
-            const mem = await guild.members.fetch(uid).catch(() => null);
-            if (mem) await mem.roles.add(ROLE_QUOTA_EXEMPT);
-            await interaction.message.edit({ embeds: [createEmbed("Vacation Approved", `<@${uid}> - ${days} Days`, COLOR_SUCCESS)], components: [] });
-        } else {
-            await interaction.message.edit({ embeds: [createEmbed("Vacation Denied", `<@${uid}>`, COLOR_FAIL)], components: [] });
+        const [action, ...args] = interaction.customId.split('_');
+
+        // VACATION LOGIC
+        if (action === 'approve' || action === 'deny') {
+            const perms = await checkPermissions(interaction.user.id);
+            if (!perms.isManager) return interaction.reply({ content: "Unauthorized.", ephemeral: true });
+            
+            const uid = args[0];
+            const days = args[1];
+
+            if (action === 'approve') {
+                const guild = client.guilds.cache.get(CONF_HQ_ID);
+                const mem = await guild.members.fetch(uid).catch(() => null);
+                if (mem) await mem.roles.add(ROLE_QUOTA_EXEMPT);
+                await interaction.message.edit({ embeds: [createEmbed("Vacation Approved", `<@${uid}> - ${days} Days`, COLOR_SUCCESS)], components: [] });
+            } else {
+                await interaction.message.edit({ embeds: [createEmbed("Vacation Denied", `<@${uid}>`, COLOR_FAIL)], components: [] });
+            }
+            return;
         }
-        return;
+
+        // DELIVERY COMPLETION (STRICT TIME & PRESENCE)
+        if (action === 'complete') {
+            const oid = args[0];
+            const order = await Order.findOne({ order_id: oid });
+            
+            if (!order) return interaction.reply({ content: "❌ Order not found.", ephemeral: true });
+            if (order.status === 'delivered') return interaction.reply({ content: "❌ Already completed.", ephemeral: true });
+            if (order.deliverer_id !== interaction.user.id) return interaction.reply({ content: "❌ Not your order.", ephemeral: true });
+
+            // 1. CHECK TIME LIMIT (5 MINUTES)
+            const timeLimit = 5 * 60 * 1000;
+            const elapsed = Date.now() - order.delivery_started_at.getTime();
+            
+            if (elapsed > timeLimit) {
+                // RESET TO READY (BACK TO QUEUE)
+                order.status = 'ready';
+                order.deliverer_id = null;
+                order.delivery_started_at = null;
+                await order.save();
+                return interaction.reply({ content: "❌ **TIMEOUT:** You took >5 mins. Order returned to queue. No pay.", ephemeral: true });
+            }
+
+            // 2. CHECK PRESENCE (MUST BE IN SERVER)
+            try {
+                const targetGuild = client.guilds.cache.get(order.guild_id);
+                if (!targetGuild) return interaction.reply({ content: "❌ Bot is not in that server.", ephemeral: true });
+                
+                await targetGuild.members.fetch(interaction.user.id); // Throws if not member
+            } catch (e) {
+                // RESET TO READY (BACK TO QUEUE)
+                order.status = 'ready';
+                order.deliverer_id = null;
+                order.delivery_started_at = null;
+                await order.save();
+                return interaction.reply({ content: "❌ **LEFT SERVER:** You must be in the server. Order returned to queue. No pay.", ephemeral: true });
+            }
+
+            // 3. SUCCESS
+            order.status = 'delivered';
+            await order.save();
+
+            const staff = await User.findOne({ user_id: interaction.user.id }) || new User({ user_id: interaction.user.id });
+            staff.balance += 30;
+            staff.deliver_count_total += 1;
+            staff.deliver_count_week += 1;
+            await staff.save();
+
+            updateOrderArchive(oid);
+            
+            await interaction.update({ components: [] });
+            await interaction.followUp({ embeds: [createEmbed("✅ Delivery Confirmed", `Payment of **30 Coins** added to vault.`, COLOR_SUCCESS)], ephemeral: true });
+            return;
+        }
     }
+
+    if (!interaction.isChatInputCommand()) return;
 
     const { commandName, options } = interaction;
     const perms = await checkPermissions(interaction.user.id);
@@ -571,6 +625,7 @@ client.on('interactionCreate', async (interaction) => {
                 check.status = 'ready'; check.ready_at = new Date(); await check.save();
                 userData.balance += 20; userData.cook_count_total++; await userData.save();
                 updateOrderArchive(check.order_id);
+                client.channels.cache.get(CHAN_DELIVERY)?.send({ embeds: [createEmbed("🥡 Ready for Pickup", `**ID:** ${check.order_id}\n**Item:** ${check.item}\n**Customer:** <@${check.user_id}>`, COLOR_MAIN)] });
             }
         }, 180000);
         return;
@@ -599,31 +654,55 @@ client.on('interactionCreate', async (interaction) => {
         if (!perms.isDelivery) return interaction.reply({ content: "❌ Delivery Only.", ephemeral: true });
         const o = await Order.findOne({ order_id: options.getString('id'), status: 'ready' });
         if (!o) return interaction.reply({ content: "❌ Not Ready.", ephemeral: true });
+        
         const guild = client.guilds.cache.get(o.guild_id);
         const channel = guild?.channels.cache.get(o.channel_id);
         if (!guild || !channel) return interaction.reply({ content: "❌ Destination Lost.", ephemeral: true });
 
-        if (!guild.members.cache.has(interaction.user.id)) {
-            try {
-                const invite = await channel.createInvite({ maxAge: 1800, maxUses: 1 });
-                const script = await Script.findOne({ user_id: interaction.user.id });
-                const cust = await client.users.fetch(o.user_id);
-                await interaction.user.send({ embeds: [createEmbed("🚴 Briefing", `**Guild:** ${guild.name}\n**Link:** ${invite.url}\n**Customer:** <@${cust.id}>`, COLOR_MAIN)] });
-                return interaction.reply({ content: "📫 Briefing Sent.", ephemeral: true });
-            } catch (e) {
-                await interaction.deferReply({ ephemeral: true });
-                await interaction.editReply("⚠️ Invite Failed. Auto-Delivering...");
-            }
-        } else {
-             await interaction.deferReply({ ephemeral: true });
-        }
+        o.status = 'delivering'; 
+        o.deliverer_id = interaction.user.id; 
+        o.delivery_started_at = new Date();
+        await o.save();
 
         const script = await Script.findOne({ user_id: interaction.user.id });
-        await channel.send({ content: `<@${o.user_id}>`, embeds: [createEmbed("🚴 Delivery", script?.script || "Enjoy!").setImage(o.images[0])] });
-        o.status = 'delivered'; o.deliverer_id = interaction.user.id; await o.save();
-        userData.balance += 30; userData.deliver_count_total++; await userData.save();
-        updateOrderArchive(o.order_id);
-        return interaction.editReply("✅ Complete.");
+        const cust = await client.users.fetch(o.user_id);
+        
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`complete_${o.order_id}`).setLabel('✅ Confirm Delivery').setStyle(ButtonStyle.Success)
+        );
+
+        let courierInServer = false;
+        try { await guild.members.fetch(interaction.user.id); courierInServer = true; } catch (e) {}
+
+        const baseMsg = `**Destination:** ${guild.name}\n**Customer:** <@${cust.id}>\n\n**Script:**\n\`\`\`${script?.script || "Enjoy!"}\`\`\``;
+
+        if (courierInServer) {
+            const jump = `https://discord.com/channels/${guild.id}/${channel.id}`;
+            const dm = createEmbed("🚴 Dispatch (Manual)", `${baseMsg}\n\n🔗 [Jump to Channel](${jump})\n\n**Instructions:**\n1. Jump to channel.\n2. Paste Script.\n3. Click button below to get paid.`, COLOR_MAIN);
+            if (o.images?.length > 0) dm.setImage(o.images[0]);
+            
+            await interaction.user.send({ embeds: [dm], components: [row] });
+            return interaction.reply({ content: "📫 Briefing Sent. Check DM.", ephemeral: true });
+        } 
+        
+        try {
+            const invite = await channel.createInvite({ maxAge: 1800, maxUses: 1 });
+            const dm = createEmbed("🚴 Dispatch (Invite)", `${baseMsg}\n\n🔗 **Invite:** ${invite.url}\n\n**Instructions:**\n1. Join Server.\n2. Paste Script.\n3. Click button below to get paid.`, COLOR_MAIN);
+            if (o.images?.length > 0) dm.setImage(o.images[0]);
+
+            await interaction.user.send({ embeds: [dm], components: [row] });
+            return interaction.reply({ content: "📫 Briefing Sent. Check DM.", ephemeral: true });
+
+        } catch (e) {
+            await interaction.deferReply({ ephemeral: true });
+            const embed = createEmbed("🚴 Delivery", script?.script || "Enjoy!").setImage(o.images[0]);
+            await channel.send({ content: `<@${o.user_id}>`, embeds: [embed] });
+            
+            o.status = 'delivered'; await o.save();
+            userData.balance += 30; userData.deliver_count_total++; await userData.save();
+            updateOrderArchive(o.order_id);
+            return interaction.editReply("⚠️ Invite Failed (Perms). Auto-Delivered.");
+        }
     }
 
     if (commandName === 'setscript') {
