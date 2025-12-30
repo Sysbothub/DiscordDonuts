@@ -2,7 +2,7 @@
  * ============================================================================
  * SUGAR RUSH - MASTER DISCORD AUTOMATION INFRASTRUCTURE
  * ============================================================================
- * * VERSION: 82.0.4 (FEATURE: MULTI-PROOF COOKING)
+ * * VERSION: 82.0.7 (FEATURE: AUTOMATIC WEEKLY QUOTA)
  * * ----------------------------------------------------------------------------
  * 📜 FULL COMMAND REGISTER (35 TOTAL COMMANDS):
  *
@@ -19,7 +19,7 @@
  * • /ban [uid] [days]         : Service bans a user from ordering.
  * • /unban [uid]              : Removes service ban from a user.
  * • /refund [id]              : Refunds an order & marks as refunded.
- * • /run_quota                : Triggers weekly audit of staff counts.
+ * • /run_quota                : Manually triggers the weekly staff quota audit.
  *
  * [3] CUSTOMER - ECONOMY & VIP
  * • /balance                  : Shows your Sugar Coin wallet.
@@ -31,7 +31,7 @@
  * [4] CUSTOMER - ORDERING
  * • /order [item]             : Standard Order (100 Sugar Coins).
  * • /super_order [item]       : Priority Order (150 Sugar Coins).
- * • /orderstatus              : Checks status of your active order.
+ * • /orderstatus              : Checks status of your active order(s) [Max 3].
  * • /orderinfo [id]           : Shows details (Chef, Driver, timestamps).
  * • /oinfo [id]               : Shortcut to check item/details for an order.
  * • /rate [id] [stars] [fb]   : Rates a delivered order (1-5 Stars).
@@ -60,6 +60,7 @@
  * 🍩 CORE SPECS:
  * - Economy: 100/50 (Std) | 150/75 (Super).
  * - Quota: Trainee(5), Senior(50%), Std(100%).
+ * - Auto-Quota: Runs Sundays at 00:00 UTC (or manually via /run_quota).
  * - Discipline: 3/6/9 Strikes.
  * - Visuals: Super(Red), VIP(Gold), Std(Orange).
  * ============================================================================
@@ -158,7 +159,7 @@ const OrderSchema = new mongoose.Schema({
     ready_at: Date,
     images: [String],
     backup_msg_id: String,
-    // NEW FIELDS FOR REVIEWS
+    kitchen_msg_id: String, 
     rating: { type: Number, default: 0 },
     feedback: { type: String, default: "" },
     rated: { type: Boolean, default: false }
@@ -180,11 +181,18 @@ const BlacklistSchema = new mongoose.Schema({
     authorized_by: String
 });
 
+// NEW: Config Schema for Auto-Runs
+const ConfigSchema = new mongoose.Schema({
+    id: { type: String, default: 'main' },
+    last_quota_run: { type: Date, default: new Date(0) }
+});
+
 const User = mongoose.model('User', UserSchema);
 const Order = mongoose.model('Order', OrderSchema);
 const VIPCode = mongoose.model('VIPCode', VIPCodeSchema);
 const Script = mongoose.model('Script', ScriptSchema);
 const ServerBlacklist = mongoose.model('ServerBlacklist', BlacklistSchema);
+const SystemConfig = mongoose.model('SystemConfig', ConfigSchema);
 
 // ============================================================================
 // [3] HELPER FUNCTIONS
@@ -280,10 +288,11 @@ async function applyWarningLogic(user) {
     return punishment;
 }
 
-// --- QUOTA ENGINE ---
-async function executeQuotaRun(interaction) {
-    await interaction.deferReply();
-    console.log(`[VERBOSE] Executing Quota Run by ${interaction.user.tag}`);
+// --- QUOTA ENGINE (Auto & Manual) ---
+async function executeQuotaRun(interaction = null) {
+    if (interaction) await interaction.deferReply();
+    console.log(`[VERBOSE] Executing Quota Run (${interaction ? 'Manual' : 'Auto'})`);
+    
     const users = await User.find({ $or: [{ cook_count_week: { $gt: 0 } }, { deliver_count_week: { $gt: 0 } }] });
     const totalDeliveries = users.reduce((acc, u) => acc + u.deliver_count_week, 0);
     const totalDishes = users.reduce((acc, u) => acc + u.cook_count_week, 0);
@@ -297,18 +306,20 @@ async function executeQuotaRun(interaction) {
     const topCouriers = [...users].sort((a, b) => b.deliver_count_week - a.deliver_count_week).slice(0, 3);
 
     let failCount = 0;
-    const supportGuild = interaction.guild;
+    const supportGuild = interaction ? interaction.guild : client.guilds.cache.get(CONF_HQ_ID);
 
     for (const u of users) {
         let quotaTarget = globalQuota;
         let isExempt = false;
 
         try {
-            const member = await supportGuild.members.fetch(u.user_id);
-            const roles = member.roles.cache;
-            if (roles.has(ROLE_QUOTA_EXEMPT)) isExempt = true;
-            else if (roles.has(ROLE_TRAINEE_COOK) || roles.has(ROLE_TRAINEE_DELIVERY)) quotaTarget = 5;
-            else if (roles.has(ROLE_SENIOR_COOK) || roles.has(ROLE_SENIOR_DELIVERY)) quotaTarget = Math.ceil(globalQuota / 2);
+            if (supportGuild) {
+                const member = await supportGuild.members.fetch(u.user_id);
+                const roles = member.roles.cache;
+                if (roles.has(ROLE_QUOTA_EXEMPT)) isExempt = true;
+                else if (roles.has(ROLE_TRAINEE_COOK) || roles.has(ROLE_TRAINEE_DELIVERY)) quotaTarget = 5;
+                else if (roles.has(ROLE_SENIOR_COOK) || roles.has(ROLE_SENIOR_DELIVERY)) quotaTarget = Math.ceil(globalQuota / 2);
+            }
         } catch (e) {}
 
         const totalWork = u.cook_count_week + u.deliver_count_week;
@@ -326,8 +337,14 @@ async function executeQuotaRun(interaction) {
         { name: "👨‍🍳 Top Chefs", value: topCooks.map((u, i) => `${i+1}. <@${u.user_id}> (${u.cook_count_week})`).join('\n') || "None" },
         { name: "🚴 Top Couriers", value: topCouriers.map((u, i) => `${i+1}. <@${u.user_id}> (${u.deliver_count_week})`).join('\n') || "None" }
     );
+    
+    // Notification
     client.channels.cache.get(CHAN_QUOTA)?.send({ content: "@here 📢 **WEEKLY AUDIT**", embeds: [embed] });
-    return interaction.editReply({ content: "✅ Quota Run Successful.", embeds: [embed] });
+    
+    // Interaction Reply (if manual)
+    if (interaction) {
+        return interaction.editReply({ content: "✅ Quota Run Successful.", embeds: [embed] });
+    }
 }
 
 // ============================================================================
@@ -340,14 +357,16 @@ const client = new Client({
 });
 
 client.once('ready', async () => {
-    console.log(`[VERBOSE] [SYSTEM] Sugar Rush v82.0.4 Online.`);
+    console.log(`[VERBOSE] [SYSTEM] Sugar Rush v82.0.7 Online.`);
     await mongoose.connect(CONF_MONGO);
     console.log(`[VERBOSE] [DATABASE] Connected to MongoDB.`);
     client.user.setPresence({ activities: [{ name: '/order | Sugar Rush', type: ActivityType.Playing }], status: 'online' });
-    setInterval(runOrderFailsafe, 60000);
+    setInterval(runSystemLoop, 60000); // Check tasks every minute
 });
 
-async function runOrderFailsafe() {
+// MAIN SYSTEM LOOP (Runs every 60s)
+async function runSystemLoop() {
+    // 1. ORDER FAILSAFE
     const limit = new Date(Date.now() - 1200000); 
     const staled = await Order.find({ status: 'ready', ready_at: { $lt: limit } });
     if (staled.length > 0) console.log(`[VERBOSE] Failsafe triggered for ${staled.length} orders.`);
@@ -356,7 +375,6 @@ async function runOrderFailsafe() {
             const guild = client.guilds.cache.get(o.guild_id);
             const chan = guild?.channels.cache.get(o.channel_id);
             if (chan) {
-                // PROFESSIONAL FAILSAFE MESSAGE
                 const embed = createEmbed("📦 Delivery Arrived", "Your order has been successfully delivered! Thank you for choosing Sugar Rush.", COLOR_SUCCESS);
                 if (o.images?.length > 0) embed.setImage(o.images[0]);
                 await chan.send({ content: `<@${o.user_id}>`, embeds: [embed] });
@@ -364,6 +382,18 @@ async function runOrderFailsafe() {
                 updateOrderArchive(o.order_id);
             }
         } catch (e) {}
+    }
+
+    // 2. AUTO QUOTA (Sundays @ 00:00)
+    const now = new Date();
+    if (now.getDay() === 0 && now.getHours() === 0) {
+        const config = await SystemConfig.findOne({ id: 'main' }) || new SystemConfig({ id: 'main' });
+        // Run only if we haven't run it today (prevents loop spam)
+        if (config.last_quota_run.toDateString() !== now.toDateString()) {
+            await executeQuotaRun(null); // Auto run
+            config.last_quota_run = now;
+            await config.save();
+        }
     }
 }
 
@@ -397,7 +427,7 @@ client.on('interactionCreate', async (interaction) => {
             return;
         }
 
-        // DELIVERY COMPLETION (STRICT TIME & PRESENCE)
+        // DELIVERY COMPLETION
         if (action === 'complete') {
             const oid = args[0];
             const order = await Order.findOne({ order_id: oid });
@@ -406,12 +436,10 @@ client.on('interactionCreate', async (interaction) => {
             if (order.status === 'delivered') return interaction.reply({ content: "❌ Already completed.", ephemeral: true });
             if (order.deliverer_id !== interaction.user.id) return interaction.reply({ content: "❌ Not your order.", ephemeral: true });
 
-            // 1. CHECK TIME LIMIT (5 MINUTES)
             const timeLimit = 5 * 60 * 1000;
             const elapsed = Date.now() - order.delivery_started_at.getTime();
             
             if (elapsed > timeLimit) {
-                // RESET TO READY (BACK TO QUEUE)
                 order.status = 'ready';
                 order.deliverer_id = null;
                 order.delivery_started_at = null;
@@ -420,14 +448,11 @@ client.on('interactionCreate', async (interaction) => {
                 return interaction.reply({ content: "❌ **TIMEOUT:** You took >5 mins. Order returned to queue. No pay.", ephemeral: true });
             }
 
-            // 2. CHECK PRESENCE (MUST BE IN SERVER)
             try {
                 const targetGuild = client.guilds.cache.get(order.guild_id);
                 if (!targetGuild) return interaction.reply({ content: "❌ Bot is not in that server.", ephemeral: true });
-                
-                await targetGuild.members.fetch(interaction.user.id); // Throws if not member
+                await targetGuild.members.fetch(interaction.user.id); 
             } catch (e) {
-                // RESET TO READY (BACK TO QUEUE)
                 order.status = 'ready';
                 order.deliverer_id = null;
                 order.delivery_started_at = null;
@@ -436,7 +461,6 @@ client.on('interactionCreate', async (interaction) => {
                 return interaction.reply({ content: "❌ **LEFT SERVER:** You must be in the server. Order returned to queue. No pay.", ephemeral: true });
             }
 
-            // 3. SUCCESS
             order.status = 'delivered';
             await order.save();
 
@@ -447,7 +471,6 @@ client.on('interactionCreate', async (interaction) => {
             await staff.save();
 
             updateOrderArchive(oid);
-            
             console.log(`[VERBOSE] Delivery Complete Order #${oid} by ${interaction.user.tag}`);
             await interaction.update({ components: [] });
             await interaction.followUp({ embeds: [createEmbed("✅ Delivery Confirmed", `Payment of **30 Sugar Coins** added to vault.`, COLOR_SUCCESS)], ephemeral: true });
@@ -495,7 +518,6 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.editReply("✅ Server Blacklisted.");
     }
 
-    // RESTORED COMMAND: UNBLACKLIST
     if (commandName === 'unserverblacklist') {
         if (!perms.isOwner) return interaction.editReply("❌ Owner Only.");
         await ServerBlacklist.deleteOne({ guild_id: options.getString('id') });
@@ -507,7 +529,6 @@ client.on('interactionCreate', async (interaction) => {
         const isFdo = commandName === 'fdo';
         const isForce = commandName === 'force_warn';
         
-        // PERMISSIONS: Manager OR (Warn AND Cook)
         if (!perms.isManager && !(commandName === 'warn' && perms.isCook)) return interaction.editReply("❌ Permission Denied.");
         
         const oid = options.getString('id');
@@ -515,21 +536,14 @@ client.on('interactionCreate', async (interaction) => {
         const order = await Order.findOne({ order_id: oid });
 
         if (!order) return interaction.editReply("❌ Invalid Order.");
-        
-        // WARN: Only before cooking (Pending/Claimed)
         if (commandName === 'warn' && !['pending', 'claimed'].includes(order.status)) return interaction.editReply("❌ Pending/Claimed only.");
-        
-        // FDO: Only before delivery (Ready)
         if (isFdo && order.status !== 'ready') return interaction.editReply("❌ Ready orders only.");
         
-        // FORCE WARN: No status check needed (Can be used on delivered orders that slipped through)
-
         const target = await User.findOne({ user_id: order.user_id }) || new User({ user_id: order.user_id });
         const pen = await applyWarningLogic(target);
 
         if (commandName === 'warn') order.status = 'cancelled_warn';
         if (isFdo) order.status = 'cancelled_fdo';
-        // force_warn does NOT cancel the order, just applies the strike.
         if (!isForce) await order.save();
 
         client.channels.cache.get(CHAN_WARNINGS)?.send({ embeds: [createEmbed("⚠️ Discipline Issued", `**Cmd:** /${commandName}\n**User:** <@${order.user_id}>\n**Penalty:** ${pen}`, COLOR_FAIL)] });
@@ -575,9 +589,11 @@ client.on('interactionCreate', async (interaction) => {
     if (commandName === 'balance') return interaction.editReply({ embeds: [createEmbed("💰 Vault", `Balance: **${userData.balance} Sugar Coins**`)] });
     
     if (commandName === 'orderstatus') {
-        const active = await Order.findOne({ user_id: interaction.user.id, status: { $in: ['pending', 'claimed', 'cooking', 'ready'] } });
-        if (!active) return interaction.editReply("❌ No active orders.");
-        return interaction.editReply({ embeds: [createEmbed("🍩 Status", `**ID:** ${active.order_id}\n**State:** ${active.status.toUpperCase()}`)] });
+        // CHANGED: ADDED MULTI-ORDER DISPLAY
+        const activeOrders = await Order.find({ user_id: interaction.user.id, status: { $in: ['pending', 'claimed', 'cooking', 'ready'] } });
+        if (!activeOrders.length) return interaction.editReply("❌ No active orders.");
+        const statusList = activeOrders.map(o => `• **ID:** \`${o.order_id}\` | **Status:** ${o.status.toUpperCase()} | **Item:** ${o.item}`).join('\n');
+        return interaction.editReply({ embeds: [createEmbed("🍩 Your Orders", statusList)] });
     }
 
     if (commandName === 'orderinfo' || commandName === 'oinfo') {
@@ -595,16 +611,14 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (commandName === 'review') {
-        // Legacy review command - consider deprecating for /rate
         client.channels.cache.get(CHAN_RATINGS)?.send({ embeds: [createEmbed("⭐ New Review", `**User:** <@${interaction.user.id}>\n**Rating:** ${options.getInteger('rating')}/5\n**Comment:** ${options.getString('comment')}`)] });
         return interaction.editReply("✅ Review Submitted.");
     }
 
     if (commandName === 'rate') {
-        const oid = options.getString('order_id'); // Ensure command option is string
+        const oid = options.getString('order_id'); 
         const stars = options.getInteger('stars');
         const fb = options.getString('feedback');
-
         const order = await Order.findOne({ order_id: oid });
 
         if (!order) return interaction.editReply("❌ Order not found.");
@@ -624,11 +638,8 @@ client.on('interactionCreate', async (interaction) => {
         ]);
 
         client.channels.cache.get(CHAN_RATINGS)?.send({ embeds: [embed] });
-        
-        // Notify Staff
         try { if(order.chef_id) (await client.users.fetch(order.chef_id)).send(`🌟 **You got a ${stars}★ review!** Order #${oid}: "${fb}"`); } catch(e){}
         try { if(order.deliverer_id && order.deliverer_id !== 'SYSTEM_FAILSAFE') (await client.users.fetch(order.deliverer_id)).send(`🌟 **You got a ${stars}★ review!** Order #${oid}: "${fb}"`); } catch(e){}
-
         return interaction.editReply("✅ Rating saved!");
     }
 
@@ -645,10 +656,8 @@ client.on('interactionCreate', async (interaction) => {
     if (commandName === 'rules') return interaction.editReply({ embeds: [createEmbed("📖 Rules", await fetchRules())] });
     
     if (commandName === 'tip') {
-        // UPGRADED TIP LOGIC
         const amt = options.getInteger('amount');
         const oid = options.getString('order_id');
-
         if (userData.balance < amt) return interaction.editReply("❌ Insufficient Sugar Coins.");
         
         const order = await Order.findOne({ order_id: oid });
@@ -658,12 +667,9 @@ client.on('interactionCreate', async (interaction) => {
 
         userData.balance -= amt; 
         await userData.save();
-
         let msg = "";
 
-        // Distribution Logic
         if (order.deliverer_id === 'SYSTEM_FAILSAFE' || !order.deliverer_id) {
-            // 100% to Cook
             if (order.chef_id) {
                 const chef = await User.findOne({ user_id: order.chef_id }) || new User({ user_id: order.chef_id });
                 chef.balance += amt;
@@ -673,9 +679,8 @@ client.on('interactionCreate', async (interaction) => {
                 msg = `✅ **${amt} Sugar Coins** burned (No staff found).`;
             }
         } else {
-            // 50/50 Split
             const split = Math.floor(amt / 2);
-            const remainder = amt % 2; // Cook gets extra penny
+            const remainder = amt % 2; 
             
             if (order.chef_id) {
                 const chef = await User.findOne({ user_id: order.chef_id }) || new User({ user_id: order.chef_id });
@@ -686,10 +691,8 @@ client.on('interactionCreate', async (interaction) => {
             const driver = await User.findOne({ user_id: order.deliverer_id }) || new User({ user_id: order.deliverer_id });
             driver.balance += split;
             await driver.save();
-
             msg = `✅ Tip Split! Chef <@${order.chef_id}> got **${split + remainder}**, Driver <@${order.deliverer_id}> got **${split}**.`;
         }
-
         return interaction.editReply(msg);
     }
 
@@ -700,16 +703,26 @@ client.on('interactionCreate', async (interaction) => {
         if (isVip) cost = Math.ceil(cost * 0.5); 
         
         if (userData.balance < cost) return interaction.editReply(`❌ Need ${cost} Sugar Coins.`);
+
+        const activeCount = await Order.countDocuments({ user_id: interaction.user.id, status: { $in: ['pending', 'claimed', 'cooking', 'ready'] } });
+        if (activeCount >= 3) return interaction.editReply("❌ limit reached: You can only have 3 active orders at a time.");
+
         const oid = Math.random().toString(36).substring(2, 8).toUpperCase();
         
-        await new Order({ order_id: oid, user_id: interaction.user.id, guild_id: interaction.guildId, channel_id: interaction.channelId, item: options.getString('item'), is_vip: isVip, is_super: isSuper }).save();
-        userData.balance -= cost; await userData.save();
-        
+        let kitchenMsgId = null;
         let title = "🍩 New Order", col = COLOR_MAIN, content = null, recTitle = "✅ Order Authorized";
         if (isSuper) { title = "🚀 SUPER ORDER"; col = COLOR_FAIL; content = "@here 🚀 **PRIORITY**"; recTitle = "🚀 SUPER ORDER CONFIRMED"; }
         else if (isVip) { title = "👑 VIP Order"; col = COLOR_VIP; recTitle = "👑 VIP Order Authorized"; }
 
-        client.channels.cache.get(CHAN_COOK)?.send({ content: content, embeds: [createEmbed(title, `ID: ${oid}\nItem: ${options.getString('item')}`, col)] });
+        const cookChan = client.channels.cache.get(CHAN_COOK);
+        if (cookChan) {
+            const msg = await cookChan.send({ content: content, embeds: [createEmbed(title, `ID: ${oid}\nItem: ${options.getString('item')}`, col)] });
+            kitchenMsgId = msg.id;
+        }
+
+        await new Order({ order_id: oid, user_id: interaction.user.id, guild_id: interaction.guildId, channel_id: interaction.channelId, item: options.getString('item'), is_vip: isVip, is_super: isSuper, kitchen_msg_id: kitchenMsgId }).save();
+        userData.balance -= cost; await userData.save();
+        
         updateOrderArchive(oid);
         console.log(`[VERBOSE] Order #${oid} Created by ${interaction.user.tag}`);
         return interaction.editReply({ embeds: [createEmbed(recTitle, `Reference ID: \`${oid}\``, col)] });
@@ -738,6 +751,21 @@ client.on('interactionCreate', async (interaction) => {
         const o = await Order.findOne({ order_id: options.getString('id'), status: 'pending' });
         if (!o) return interaction.editReply("❌ Invalid.");
         o.status = 'claimed'; o.chef_id = interaction.user.id; o.chef_name = interaction.user.username; await o.save();
+        
+        // UPDATE KITCHEN MESSAGE TO "CLAIMED"
+        if (o.kitchen_msg_id) {
+            try {
+                const chan = client.channels.cache.get(CHAN_COOK);
+                const msg = await chan.messages.fetch(o.kitchen_msg_id);
+                const oldEmbed = msg.embeds[0];
+                const newEmbed = new EmbedBuilder(oldEmbed.data)
+                    .setTitle(`👨‍🍳 CLAIMED: ${oldEmbed.title}`) 
+                    .addFields({ name: 'Chef', value: `<@${interaction.user.id}>` })
+                    .setColor(COLOR_SUCCESS); 
+                await msg.edit({ content: null, embeds: [newEmbed] });
+            } catch (e) {}
+        }
+
         updateOrderArchive(o.order_id);
         console.log(`[VERBOSE] Order #${o.order_id} Claimed by Chef ${interaction.user.tag}`);
         return interaction.editReply(`👨‍🍳 Claimed: ${o.order_id}`);
@@ -768,7 +796,6 @@ client.on('interactionCreate', async (interaction) => {
         
         o.status = 'cooking'; 
         
-        // MULTI-PROOF LOGIC (UP TO 3)
         const proofs = [];
         if(options.getAttachment('image')) proofs.push(options.getAttachment('image').url);
         if(options.getString('link')) proofs.push(options.getString('link'));
@@ -796,7 +823,6 @@ client.on('interactionCreate', async (interaction) => {
         return;
     }
 
-    // --- STAFF: LOGISTICS ---
     if (commandName === 'deliverylist') {
         if (!perms.isDelivery) return interaction.editReply("❌ Delivery Only.");
         const orders = await Order.find({ status: 'ready' });
@@ -863,7 +889,6 @@ client.on('interactionCreate', async (interaction) => {
         } catch (e) {
             await interaction.deferReply({ ephemeral: true });
             
-            // PROFESSIONAL FALLBACK DELIVERY (INVITE FAIL)
             const embed = createEmbed("📦 Delivery Arrived", script?.script || "Your order has been successfully delivered! Enjoy your meal.", COLOR_MAIN).setImage(o.images[0]);
             
             await channel.send({ content: `<@${o.user_id}>`, embeds: [embed] });
@@ -882,7 +907,6 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.editReply("✅ Saved.");
     }
 
-    // --- STAFF: UTILS ---
     if (commandName === 'stats') {
         const target = options.getUser('user') || interaction.user;
         const tData = await User.findOne({ user_id: target.id });
@@ -909,7 +933,6 @@ client.on('interactionCreate', async (interaction) => {
     }
 });
 
-// OWNER EVAL
 client.on('messageCreate', async (m) => {
     if (m.author.bot || !m.content.startsWith("!eval") || m.author.id !== CONF_OWNER) return;
     try { m.channel.send(`\`\`\`js\n${util.inspect(await eval(m.content.slice(5)), {depth:0})}\n\`\`\``); } catch (e) { m.channel.send(`${e}`); }
