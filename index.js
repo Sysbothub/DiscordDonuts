@@ -2,20 +2,20 @@
  * ============================================================================
  * SUGAR RUSH - MASTER DISCORD AUTOMATION INFRASTRUCTURE
  * ============================================================================
- * * VERSION: 82.0.9 (FEATURE: INVITE ERROR HANDLING)
+ * * VERSION: 82.6.7 (FINAL: APPEAL INFO ADDED - FULL SYNC)
  * * ----------------------------------------------------------------------------
  * 📜 FULL COMMAND REGISTER (35 TOTAL COMMANDS):
  *
  * [1] OWNER & SYSTEM
- * • !eval [code]              : (Message) Executes raw Node.js code.
+ * • !eval [code]              : (Purged for Security)
  * • /generate_codes [amt]     : Creates VIP codes for the shop database.
  * • /serverblacklist [id] [r] : Bans a specific server from using the bot.
- * • /unserverblacklist [id]   : Unbans a server (Restored Command).
+ * • /unserverblacklist [id]   : Unbans a server.
  *
  * [2] MANAGEMENT & DISCIPLINE
- * • /warn [id] [reason]       : (Cooks/Mgmt) Warns user. Pre-cooking (Pending/Claimed) ONLY.
- * • /fdo [id] [reason]        : (Mgmt) Force Discipline. Pre-delivery (Ready) ONLY.
- * • /force_warn [id] [reason] : (Mgmt) Force Warn. Applied to ANY status (e.g. Delivered).
+ * • /warn [id] [reason]       : (Cooks/Mgmt) Warns user. Pre-cooking ONLY.
+ * • /fdo [id] [reason]        : (Mgmt) Force Discipline. Pre-delivery ONLY.
+ * • /force_warn [id] [reason] : (Mgmt) Force Warn. Applied to ANY status.
  * • /ban [uid] [days]         : Service bans a user from ordering.
  * • /unban [uid]              : Removes service ban from a user.
  * • /refund [id]              : Refunds an order & marks as refunded.
@@ -24,7 +24,7 @@
  * [3] CUSTOMER - ECONOMY & VIP
  * • /balance                  : Shows your Sugar Coin wallet.
  * • /daily                    : Claims daily reward (1000 or 2000 VIP).
- * • /tip [id] [amt]           : Tips coins to staff (Splits Cook/Driver).
+ * • /tip [id] [amt]           : Tips Sugar Coins to staff (Splits Cook/Driver).
  * • /redeem [code]            : Activates 30-day VIP status.
  * • /premium                  : Links to the donation shop.
  *
@@ -35,11 +35,11 @@
  * • /orderinfo [id]           : Shows details (Chef, Driver, timestamps).
  * • /oinfo [id]               : Shortcut to check item/details for an order.
  * • /rate [id] [stars] [fb]   : Rates a delivered order (1-5 Stars).
- * • /review [rating] [msg]    : (Legacy) Submit a general review.
+ * • /review [rating] [msg]    : Submit a general review.
  *
  * [5] STAFF - KITCHEN (Cook Role)
  * • /claim [id]               : Assigns a pending order to you.
- * • /cook [id] [proofs...]    : Starts 3m cooking timer. Accepts up to 3 images/links.
+ * • /cook [id] [proofs...]    : Starts 3m cooking timer. Accepts up to 3 proofs.
  * • /orderlist                 : View pending queue (Priority Sorted).
  *
  * [6] STAFF - DELIVERY (Driver Role)
@@ -50,9 +50,10 @@
  * [7] STAFF - GENERAL
  * • /stats [user]             : View balance and work history.
  * • /vacation [days]          : Request quota exemption.
- * • /staff_buy                : Buy 'Double Stats' buff (15k Coins).
+ * • /staff_buy                : Buy 'Double Stats' buff (15k Sugar Coins).
  *
  * [8] UTILITY
+ * • /help                     : View complete command protocol directory.
  * • /invite                   : Get bot invite link.
  * • /support                  : Get HQ server link.
  * • /rules                    : Read rules from Google Sheets.
@@ -61,10 +62,24 @@
 
 require('dotenv').config();
 
-const { Client, GatewayIntentBits, Partials, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ActivityType } = require('discord.js');
+const { 
+    Client, 
+    GatewayIntentBits, 
+    Partials, 
+    EmbedBuilder, 
+    ActionRowBuilder, 
+    ButtonBuilder, 
+    ButtonStyle, 
+    ActivityType 
+} = require('discord.js');
+
 const mongoose = require('mongoose');
 const { google } = require('googleapis');
 const util = require('util');
+
+// ============================================================================
+// [1] CONFIGURATION & CONSTANTS
+// ============================================================================
 
 const CONF_TOKEN = process.env.DISCORD_TOKEN;
 const CONF_MONGO = process.env.MONGO_URI;
@@ -74,328 +89,431 @@ const CONF_HQ_ID = '1454857011866112063';
 const CONF_STORE = "https://donuts.sell.app/";
 const CONF_SUPPORT_SERVER = "https://discord.gg/Q4DsEbJzBJ";
 
-// ROLE IDs
-const ROLE_COOK = '1454877400729911509', ROLE_DELIVERY = '1454877287953469632', ROLE_MANAGER = '1454876343878549630';
-const ROLE_TRAINEE_COOK = '', ROLE_TRAINEE_DELIVERY = '', ROLE_SENIOR_COOK = '', ROLE_SENIOR_DELIVERY = '';
+// ROLES
+const ROLE_COOK = '1454877400729911509';
+const ROLE_DELIVERY = '1454877287953469632';
+const ROLE_MANAGER = '1454876343878549630';
 const ROLE_QUOTA_EXEMPT = '1454936082591252534';
 
-// CHANNEL IDs
-const CHAN_COOK = '1454879418999767122', CHAN_DELIVERY = '1454880879741767754', CHAN_WARNINGS = '1454881451161026637';
-const CHAN_RATINGS = '1454884136740327557', CHAN_VACATION = '1454886383662665972', CHAN_QUOTA = '1454895987322519672';
-const COLOR_MAIN = 0xFFA500, COLOR_FAIL = 0xFF0000, COLOR_SUCCESS = 0x2ECC71, COLOR_VIP = 0xF1C40F;
+// QUOTA RANKS
+const ROLE_TRAINEE_COOK = 'REPLACE_ID';
+const ROLE_TRAINEE_DELIVERY = 'REPLACE_ID';
+const ROLE_SENIOR_COOK = 'REPLACE_ID';
+const ROLE_SENIOR_DELIVERY = 'REPLACE_ID';
 
-// --- SCHEMAS (ZERO OMISSION) ---
-const User = mongoose.model('User', new mongoose.Schema({
-    user_id: { type: String, required: true, unique: true }, balance: { type: Number, default: 0 },
-    last_daily: { type: Date, default: new Date(0) }, cook_count_week: { type: Number, default: 0 },
-    cook_count_total: { type: Number, default: 0 }, deliver_count_week: { type: Number, default: 0 },
-    deliver_count_total: { type: Number, default: 0 }, vip_until: { type: Date, default: new Date(0) },
-    is_perm_banned: { type: Boolean, default: false }, service_ban_until: { type: Date, default: null },
-    warnings: { type: Number, default: 0 }, double_stats_until: { type: Date, default: new Date(0) }
-}));
+// CHANNELS
+const CHAN_COOK = '1454879418999767122';
+const CHAN_DELIVERY = '1454880879741767754';
+const CHAN_BACKUP = '1454888266451910901';
+const CHAN_QUOTA = '1454895987322519672';
+const CHAN_WARNINGS = '1454881451161026637';
+const CHAN_RATINGS = '1454884136740327557';
+const CHAN_VACATION = '1454886383662665972';
 
-const Order = mongoose.model('Order', new mongoose.Schema({
-    order_id: String, user_id: String, guild_id: String, channel_id: String, status: { type: String, default: 'pending' }, 
-    item: String, is_super: { type: Boolean, default: false }, is_vip: { type: Boolean, default: false },
-    chef_id: String, chef_name: String, deliverer_id: String, 
-    delivery_started_at: Date, ready_at: Date, images: [String], rating: { type: Number, default: 0 }, rated: { type: Boolean, default: false }, feedback: String
-}));
+// COLORS
+const COLOR_MAIN = 0xFFA500;   
+const COLOR_VIP = 0xF1C40F;    
+const COLOR_FAIL = 0xFF0000;   
+const COLOR_SUCCESS = 0x2ECC71; 
 
-const ServerBlacklist = mongoose.model('ServerBlacklist', new mongoose.Schema({ guild_id: String, reason: String, authorized_by: String }));
+// ============================================================================
+// [2] DATABASE SCHEMAS
+// ============================================================================
+
+const UserSchema = new mongoose.Schema({
+    user_id: { type: String, required: true, unique: true },
+    balance: { type: Number, default: 0 },
+    last_daily: { type: Date, default: new Date(0) },
+    cook_count_week: { type: Number, default: 0 },
+    cook_count_total: { type: Number, default: 0 },
+    deliver_count_week: { type: Number, default: 0 },
+    deliver_count_total: { type: Number, default: 0 },
+    vip_until: { type: Date, default: new Date(0) },
+    is_perm_banned: { type: Boolean, default: false },
+    service_ban_until: { type: Date, default: null },
+    double_stats_until: { type: Date, default: new Date(0) },
+    warnings: { type: Number, default: 0 }
+});
+
+const OrderSchema = new mongoose.Schema({
+    order_id: String,
+    user_id: String,
+    guild_id: String,
+    channel_id: String,
+    status: { type: String, default: 'pending' }, 
+    item: String,
+    is_vip: { type: Boolean, default: false },
+    is_super: { type: Boolean, default: false },
+    created_at: { type: Date, default: Date.now },
+    chef_name: String,
+    chef_id: String,
+    deliverer_id: String,
+    delivery_started_at: Date, 
+    ready_at: Date,
+    images: [String],
+    rating: { type: Number, default: 0 },
+    feedback: { type: String, default: "" },
+    rated: { type: Boolean, default: false }
+});
+
+const User = mongoose.model('User', UserSchema);
+const Order = mongoose.model('Order', OrderSchema);
 const VIPCode = mongoose.model('VIPCode', new mongoose.Schema({ code: { type: String, unique: true }, is_used: { type: Boolean, default: false } }));
 const Script = mongoose.model('Script', new mongoose.Schema({ user_id: String, script: String }));
+const ServerBlacklist = mongoose.model('ServerBlacklist', new mongoose.Schema({ guild_id: String, reason: String, authorized_by: String }));
+const SystemConfig = mongoose.model('SystemConfig', new mongoose.Schema({ id: { type: String, default: 'main' }, last_quota_run: { type: Date, default: new Date(0) } }));
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages], partials: [Partials.Channel, Partials.Message] });
+// ============================================================================
+// [3] HELPER FUNCTIONS
+// ============================================================================
 
-const auth = new google.auth.GoogleAuth({ keyFile: 'credentials.json', scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'] });
-async function fetchRules() { try { const sheets = google.sheets({ version: 'v4', auth }); const res = await sheets.spreadsheets.values.get({ spreadsheetId: CONF_SHEET, range: 'Rules!A1:B20' }); return res.data.values.map(r => `🍩 **${r[0]}**\n└ ${r[1]}`).join('\n\n'); } catch (e) { return "Rules Syncing..."; } }
-
-function createProfessionalEmbed(title, description, color = COLOR_MAIN) {
-    return new EmbedBuilder().setAuthor({ name: "Sugar Rush Operations" }).setTitle(title).setDescription(description || null).setColor(color).setTimestamp();
+function createEmbed(title, description, color = COLOR_MAIN, fields = []) {
+    return new EmbedBuilder()
+        .setAuthor({ name: "Sugar Rush" })
+        .setTitle(title)
+        .setDescription(description || null)
+        .setColor(color)
+        .setFooter({ text: "Sugar Rush Operations" })
+        .setTimestamp()
+        .addFields(fields);
 }
 
-// --- 3-6-9 AUTO-BAN ENGINE ---
-async function applyStrikes(userId, reason) {
-    const u = await User.findOne({ user_id: userId }) || new User({ user_id: userId });
-    u.warnings += 1;
-    let banMsg = "";
-    if (u.warnings === 3) { u.service_ban_until = new Date(Date.now() + 3 * 86400000); banMsg = "Due to receiving **3 Warnings** with us You have been given a 3-Day Suspension. \n**Appeals:**Join the Sugar Rush [Support Server](https://discord.gg/Q4DsEbJzBJ) or DM us to open a Support ticket."; }
-    else if (u.warnings === 6) { u.service_ban_until = new Date(Date.now() + 7 * 86400000); banMsg = "Due to receiving **6 Warnings** with us You have been given a 7-Day Suspension. from using Sugar Rush \n**Appeals:**Join the Sugar Rush [Support Server](https://discord.gg/Q4DsEbJzBJ) or DM us to open a Support ticket."; }
-    else if (u.warnings >= 9) { u.is_perm_banned = true; banMsg = "Due to receiving **9 Warnings** with us You have been Permanently Suspeneded from using Sugar Rush \n**Appeals:**Join the Sugar Rush [Support Server](https://discord.gg/Q4DsEbJzBJ) or DM us to open a Support ticket."; }
-    await u.save();
+const auth = new google.auth.GoogleAuth({
+    keyFile: 'credentials.json',
+    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+});
+
+async function fetchRules() {
+    try {
+        const sheets = google.sheets({ version: 'v4', auth });
+        const res = await sheets.spreadsheets.values.get({ spreadsheetId: CONF_SHEET, range: 'Rules!A1:B20' });
+        return res.data.values.map(r => `🍩 **${r[0]}**\n└ ${r[1]}`).join('\n\n');
+    } catch (e) { return "Rules Offline."; }
+}
+
+async function applyWarningLogic(user, reason) {
+    user.warnings += 1;
+    let punishment = "Formal Warning";
+    if (user.warnings === 3) {
+        user.service_ban_until = new Date(Date.now() + 7 * 86400000);
+        punishment = "7-Day Service Ban";
+    } else if (user.warnings === 6) {
+        user.service_ban_until = new Date(Date.now() + 30 * 86400000);
+        punishment = "30-Day Service Ban";
+    } else if (user.warnings >= 9) {
+        user.is_perm_banned = true;
+        punishment = "Permanent Blacklist";
+    }
+    await user.save();
     
-    const target = await client.users.fetch(userId).catch(() => null);
-    if (target) target.send({ embeds: [createProfessionalEmbed("Protocol Violation", `A strike has been added.\n\n**Reason:** ${reason}\n**Total Strikes:** ${u.warnings}${banMsg}`, COLOR_FAIL)] }).catch(() => {});
-    client.channels.cache.get(CHAN_WARNINGS).send({ embeds: [createProfessionalEmbed("Discipline Log", `User: <@${userId}>\nStrikes: ${u.warnings}`, COLOR_FAIL)] });
+    const customer = await client.users.fetch(user.user_id).catch(() => null);
+    if (customer) {
+        customer.send({ embeds: [createEmbed("⚠️ Discipline Issued", `**Reason:** ${reason}\n**Strikes:** ${user.warnings}\n**Penalty:** ${punishment}`, COLOR_FAIL)] }).catch(() => {});
+    }
+    client.channels.cache.get(CHAN_WARNINGS)?.send({ embeds: [createEmbed("🛡️ Discipline Log", `User: <@${user.user_id}>\nReason: ${reason}\nPenalty: ${punishment}`, COLOR_FAIL)] });
+    return punishment;
 }
 
-client.on('interactionCreate', async (int) => {
-    // PRESENCE-ENFORCED FORFEIT PAY
-    if (int.isButton()) {
-        const [action, ...args] = int.customId.split('_');
+async function executeQuotaRun(interaction = null) {
+    if (interaction) await interaction.deferReply();
+    const users = await User.find({ $or: [{ cook_count_week: { $gt: 0 } }, { deliver_count_week: { $gt: 0 } }] });
+    const topStaff = [...users].sort((a, b) => (b.cook_count_week + b.deliver_count_week) - (a.cook_count_week + a.deliver_count_week)).slice(0, 5);
+    const totalWork = users.reduce((acc, u) => acc + u.deliver_count_week + u.cook_count_week, 0);
+    let globalQuota = Math.ceil(totalWork / Math.max(1, users.length));
+    if (globalQuota < 5) globalQuota = 5;
+
+    for (const u of users) {
+        let target = globalQuota;
+        try {
+            const member = await client.guilds.cache.get(CONF_HQ_ID).members.fetch(u.user_id);
+            if (member.roles.cache.has(ROLE_QUOTA_EXEMPT)) continue;
+            else if (member.roles.cache.has(ROLE_TRAINEE_COOK) || member.roles.cache.has(ROLE_TRAINEE_DELIVERY)) target = 5;
+            else if (member.roles.cache.has(ROLE_SENIOR_COOK) || member.roles.cache.has(ROLE_SENIOR_DELIVERY)) target = Math.ceil(globalQuota / 2);
+        } catch (e) {}
+        if ((u.cook_count_week + u.deliver_count_week) < target) await applyWarningLogic(u, "Failed Weekly Quota");
+        u.cook_count_week = 0; u.deliver_count_week = 0; await u.save();
+    }
+    const leaders = topStaff.map((u, i) => `\`#${i+1}\` <@${u.user_id}>: **${u.cook_count_week + u.deliver_count_week}**`).join('\n') || "None.";
+    client.channels.cache.get(CHAN_QUOTA)?.send({ content: "@here 📢 **WEEKLY AUDIT**", embeds: [createEmbed("📊 Top Performers", leaders, COLOR_MAIN)] });
+    if (interaction) return interaction.editReply({ embeds: [createEmbed("✅ Audit Complete", "Weekly quota run finalized.", COLOR_SUCCESS)] });
+}
+
+// ============================================================================
+// [4] INTERACTION ROUTER
+// ============================================================================
+
+const client = new Client({
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages],
+    partials: [Partials.Channel, Partials.Message]
+});
+
+client.on('interactionCreate', async (interaction) => {
+    
+    if (interaction.isButton()) {
+        const [action, ...args] = interaction.customId.split('_');
         if (action === 'complete') {
             const o = await Order.findOne({ order_id: args[0] });
-            const targetGuild = client.guilds.cache.get(o.guild_id);
-            try { await targetGuild.members.fetch(int.user.id); } catch (e) {
+            try { await client.guilds.cache.get(o.guild_id).members.fetch(interaction.user.id); } catch (e) {
                 o.status = 'ready'; o.deliverer_id = null; await o.save();
-                return int.update({ embeds: [createProfessionalEmbed("PAYMENT FORFEITED", "Verification failed. Presence in server required. Order reset.", COLOR_FAIL)], components: [] });
+                return interaction.update({ embeds: [createEmbed("PAYMENT FORFEITED", "Presence in destination server required for pay claim. Order reset.", COLOR_FAIL)], components: [] });
             }
             o.status = 'delivered'; await o.save();
-            await User.findOneAndUpdate({ user_id: int.user.id }, { $inc: { balance: 30, deliver_count_total: 1, deliver_count_week: 1 } });
-            return int.update({ embeds: [createProfessionalEmbed("CONFIRMED", "30 Coins credited.", COLOR_SUCCESS)], components: [] });
+            await User.findOneAndUpdate({ user_id: interaction.user.id }, { $inc: { balance: 30, deliver_count_week: 1, deliver_count_total: 1 } });
+            return interaction.update({ embeds: [createEmbed("CONFIRMED", "30 Sugar Coins added to vault.", COLOR_SUCCESS)], components: [] });
         }
-        if (action === 'approve' || action === 'deny') {
-            if (!int.member.roles.cache.has(ROLE_MANAGER)) return int.reply({content: "Managers Only", ephemeral: true});
-            if (action === 'approve') {
-                const mem = await client.guilds.cache.get(CONF_HQ_ID).members.fetch(args[0]);
-                await mem.roles.add(ROLE_QUOTA_EXEMPT);
-                return int.message.edit({components: [], embeds: [createProfessionalEmbed("Approved", `<@${args[0]}> granted vacation.`)]});
-            } else {
-                return int.message.edit({components: [], embeds: [createProfessionalEmbed("Denied", "Vacation request denied.", COLOR_FAIL)]});
-            }
+        if (action.startsWith('approve')) {
+            if (!interaction.member.roles.cache.has(ROLE_MANAGER)) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Management Only.", COLOR_FAIL)], ephemeral: true });
+            const uid = args[0];
+            const member = await client.guilds.cache.get(CONF_HQ_ID).members.fetch(uid).catch(() => null);
+            if (member) await member.roles.add(ROLE_QUOTA_EXEMPT);
+            return interaction.update({ embeds: [createEmbed("✅ Approved", "Vacation request granted.", COLOR_SUCCESS)], components: [] });
+        }
+        if (action.startsWith('deny')) {
+            if (!interaction.member.roles.cache.has(ROLE_MANAGER)) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Management Only.", COLOR_FAIL)], ephemeral: true });
+            return interaction.update({ embeds: [createEmbed("❌ Denied", "Vacation request denied.", COLOR_FAIL)], components: [] });
         }
     }
 
-    if (!int.isChatInputCommand()) return;
-    const { commandName: cmd, options: opt } = int;
-    
-    // --- SERVER BLACKLIST GATE ---
-    const isBlacklisted = await ServerBlacklist.findOne({ guild_id: int.guildId });
-    if (isBlacklisted) return int.reply({ content: `❌ **This server is blacklisted.**\nReason: ${isBlacklisted.reason} \n**Appeals:**Join the Sugar Rush [Support Server](https://discord.gg/Q4DsEbJzBJ) or DM us to open a Support ticket.`, ephemeral: false });
+    if (!interaction.isChatInputCommand()) return;
+    const { commandName, options } = interaction;
+    const userData = await User.findOne({ user_id: interaction.user.id }) || new User({ user_id: interaction.user.id });
 
-    // --- USER BAN GATE ---
-    const uData = await User.findOne({ user_id: int.user.id }) || new User({ user_id: int.user.id });
-    if (uData.is_perm_banned || (uData.service_ban_until && uData.service_ban_until > Date.now())) return int.reply({ content: "You are suspeneded from using the Sugar Rush service. \n**Appeals:**Join the Sugar Rush [Support Server](https://discord.gg/Q4DsEbJzBJ) or DM us to open a Support ticket.", ephemeral: true });
-
-    // [2] /generate_codes
-    if (cmd === 'generate_codes') {
-        if (int.user.id !== CONF_OWNER) return int.reply("Unauthorized.");
-        const codes = []; for (let i = 0; i < opt.getInteger('amt'); i++) { 
-            const c = `SR-${Math.random().toString(36).substring(2, 9).toUpperCase()}`; 
-            await new VIPCode({ code: c }).save(); codes.push(c); 
-        }
-        return int.reply(`Generated ${codes.length} codes.`);
-    }
-    // [3] /serverblacklist
-    if (cmd === 'serverblacklist') { 
-        if (int.user.id !== CONF_OWNER) return int.reply("Unauthorized.");
-        await new ServerBlacklist({ guild_id: opt.getString('id'), reason: opt.getString('reason') }).save(); 
-        return int.reply("Server Banned."); 
-    }
-    // [4] /unserverblacklist
-    if (cmd === 'unserverblacklist') { 
-        if (int.user.id !== CONF_OWNER) return int.reply("Unauthorized.");
-        await ServerBlacklist.deleteOne({ guild_id: opt.getString('id') }); 
-        return int.reply("Server Restored."); 
+    // GATES: BANS & SERVER BLACKLIST
+    if (userData.is_perm_banned || (userData.service_ban_until > Date.now())) {
+        return interaction.reply({ 
+            embeds: [createEmbed("❌ Access Denied", `You are currently banned from Sugar Rush.\n\n**Appeal:** Join the [Support Server](${CONF_SUPPORT_SERVER}) OR DM this bot to open a ticket.`, COLOR_FAIL)], 
+            ephemeral: true 
+        });
     }
     
-    // [5] /warn, [6] /fdo, [7] /force_warn
-    if (['warn', 'fdo', 'force_warn'].includes(cmd)) {
-        const o = await Order.findOne({ order_id: opt.getString('id') });
-        if (!o) return int.reply("Invalid ID.");
-        if ((cmd === 'fdo' || cmd === 'force_warn') && !int.member.roles.cache.has(ROLE_MANAGER)) return int.reply("Management Only.");
-        if (cmd === 'warn' && !int.member.roles.cache.has(ROLE_COOK) && !int.member.roles.cache.has(ROLE_MANAGER)) return int.reply("Cooks/Management Only.");
-        
-        if (cmd === 'warn' && !['pending', 'claimed'].includes(o.status)) return int.reply("Pre-cook only.");
-        if (cmd === 'fdo' && o.status !== 'ready') return int.reply("Pre-delivery only.");
-        
-        if (cmd === 'warn') o.status = 'cancelled_warn';
-        if (cmd === 'fdo') o.status = 'cancelled_fdo';
-        await o.save(); await applyStrikes(o.user_id, opt.getString('reason'));
-        return int.reply("Strike applied.");
+    const isServerBlacklisted = await ServerBlacklist.findOne({ guild_id: interaction.guildId });
+    if (isServerBlacklisted) {
+        return interaction.reply({ 
+            embeds: [createEmbed("❌ Server Blacklisted", `**Reason:** ${isServerBlacklisted.reason}\n\n**Appeal:** Join the [Support Server](${CONF_SUPPORT_SERVER}) OR DM this bot to open a ticket.`, COLOR_FAIL)], 
+            ephemeral: true 
+        });
     }
 
-    // [8] /ban, [9] /unban, [10] /refund, [11] /run_quota
-    if (cmd === 'ban') {
-        if (!int.member.roles.cache.has(ROLE_MANAGER)) return int.reply("Management Only.");
-        await User.findOneAndUpdate({ user_id: opt.getString('uid') }, { service_ban_until: new Date(Date.now() + opt.getInteger('days') * 86400000) });
-        return int.reply("User Banned.");
-    }
-    if (cmd === 'unban') {
-        if (!int.member.roles.cache.has(ROLE_MANAGER)) return int.reply("Management Only.");
-        await User.findOneAndUpdate({ user_id: opt.getString('uid') }, { service_ban_until: null, is_perm_banned: false });
-        return int.reply("User Unbanned.");
-    }
-    if (cmd === 'refund') {
-        if (!int.member.roles.cache.has(ROLE_MANAGER)) return int.reply("Management Only.");
-        const o = await Order.findOne({ order_id: opt.getString('id') });
-        await User.findOneAndUpdate({ user_id: o.user_id }, { $inc: { balance: 100 } });
-        o.status = 'refunded'; await o.save();
-        return int.reply("Order Refunded.");
-    }
-    if (cmd === 'run_quota') { 
-        if (!int.member.roles.cache.has(ROLE_MANAGER)) return int.reply("Management Only.");
-        const users = await User.find({ $or: [{ cook_count_week: { $gt: 0 } }, { deliver_count_week: { $gt: 0 } }] });
-        for (const u of users) {
-            let target = 10;
-            try {
-                const mem = await client.guilds.cache.get(CONF_HQ_ID).members.fetch(u.user_id);
-                if (mem.roles.cache.has(ROLE_TRAINEE_COOK)) target = 5;
-            } catch(e){}
-            if (u.cook_count_week + u.deliver_count_week < target) u.warnings++;
-            u.cook_count_week = 0; u.deliver_count_week = 0; await u.save();
-        }
-        return int.reply("Quota audit complete."); 
-    }
-
-    // [12] /balance, [13] /daily, [14] /tip, [15] /redeem, [16] /premium
-    if (cmd === 'balance') return int.reply({embeds: [createProfessionalEmbed("Wallet", `Balance: **${uData.balance}** Sugar Coins`)]});
-    if (cmd === 'daily') { 
-        if (Date.now() - uData.last_daily < 86400000) return int.reply("Cooldown active.");
-        uData.balance += (uData.vip_until > Date.now() ? 2000 : 1000); 
-        uData.last_daily = Date.now();
-        await uData.save(); return int.reply("Daily claimed."); 
-    }
-    if (cmd === 'tip') {
-        const o = await Order.findOne({ order_id: opt.getString('id') });
-        if (!o) return int.reply("Invalid Order ID.");
-        if (uData.balance < opt.getInteger('amt')) return int.reply("Insufficient funds.");
-        uData.balance -= opt.getInteger('amt'); await uData.save();
-        
-        const chefShare = Math.floor(opt.getInteger('amt') / 2);
-        const driverShare = Math.ceil(opt.getInteger('amt') / 2);
-        if (o.chef_id) await User.findOneAndUpdate({ user_id: o.chef_id }, { $inc: { balance: chefShare } });
-        if (o.deliverer_id) await User.findOneAndUpdate({ user_id: o.deliverer_id }, { $inc: { balance: driverShare } });
-        
-        return int.reply(`Tip distributed: ${chefShare} to Cook, ${driverShare} to Driver.`);
-    }
-    if (cmd === 'redeem') {
-        const c = await VIPCode.findOne({ code: opt.getString('code'), is_used: false });
-        if (!c) return int.reply("Invalid code.");
-        c.is_used = true; await c.save();
-        uData.vip_until = new Date(Date.now() + 30 * 86400000); await uData.save();
-        return int.reply("VIP Redeemed for 30 days.");
-    }
-    if (cmd === 'premium') return int.reply({embeds: [createProfessionalEmbed("Premium Store", CONF_STORE)]});
-
-    // [17] /order, [18] /super_order, [19] /orderstatus, [20] /orderinfo, [21] /oinfo, [22] /rate, [23] /review
-    if (cmd === 'order' || cmd === 'super_order') {
-        const isSuper = cmd === 'super_order';
-        const isVip = uData.vip_until > Date.now();
-        let cost = isSuper ? 150 : 100;
-        if (isVip) cost = Math.ceil(cost * 0.5); // VIP 50% Fix
-
-        if (uData.balance < cost) return int.reply(`Insufficient funds. Need ${cost}.`);
-
-        const oid = Math.random().toString(36).substring(2, 8).toUpperCase();
-        await new Order({ order_id: oid, user_id: int.user.id, guild_id: int.guildId, channel_id: int.channelId, item: opt.getString('item'), is_super: isSuper, is_vip: isVip }).save();
-        uData.balance -= cost; await uData.save();
-        client.channels.cache.get(CHAN_COOK).send(`🍩 **New Order:** \`${oid}\``);
-        return int.reply(`Logged: \`${oid}\``);
-    }
-    if (cmd === 'orderstatus') {
-        const active = await Order.find({ user_id: int.user.id, status: { $ne: 'delivered' } });
-        return int.reply({embeds: [createProfessionalEmbed("Your Active Orders", active.map(o => `• \`${o.order_id}\`: ${o.status}`).join("\n") || "No active orders.")]});
-    }
-    if (cmd === 'orderinfo' || cmd === 'oinfo') {
-        const o = await Order.findOne({ order_id: opt.getString('id') });
-        if (!o) return int.reply("Order not found.");
-        return int.reply({embeds: [createProfessionalEmbed(`Info: ${o.order_id}`, `Item: ${o.item}\nStatus: ${o.status}\nChef: <@${o.chef_id}>\nDriver: <@${o.deliverer_id}>`)]});
-    }
-    if (cmd === 'rate') {
-        const o = await Order.findOne({ order_id: opt.getString('id') });
-        if (!o || o.user_id !== int.user.id) return int.reply("Invalid order.");
-        o.rating = opt.getInteger('stars'); o.feedback = opt.getString('fb'); o.rated = true; await o.save();
-        return int.reply("Rating submitted.");
-    }
-    if (cmd === 'review') {
-        client.channels.cache.get(CHAN_RATINGS).send({embeds: [createProfessionalEmbed("Review", `**Stars:** ${opt.getInteger('rating')}\n**Message:** ${opt.getString('msg')}`)]});
-        return int.reply("Review published.");
-    }
-
-    // [24] /claim, [25] /cook, [26] /orderlist
-    if (cmd === 'claim') {
-        if (!int.member.roles.cache.has(ROLE_COOK)) return int.reply("Cooks Only.");
-        await Order.findOneAndUpdate({ order_id: opt.getString('id'), status: 'pending' }, { status: 'claimed', chef_id: int.user.id, chef_name: int.user.username });
-        return int.reply("Claimed.");
-    }
-    if (cmd === 'cook') {
-        if (!int.member.roles.cache.has(ROLE_COOK)) return int.reply("Cooks Only.");
-        await Order.findOneAndUpdate({ order_id: opt.getString('id') }, { status: 'cooking' });
-        setTimeout(async () => { await Order.findOneAndUpdate({ order_id: opt.getString('id') }, { status: 'ready', ready_at: new Date() }); client.channels.cache.get(CHAN_DELIVERY).send(`🥡 **Ready:** \`${opt.getString('id')}\``); }, 180000); 
-        return int.reply("Cooking timer started (3m).");
-    }
-    if (cmd === 'orderlist') {
-        if (!int.member.roles.cache.has(ROLE_COOK)) return int.reply("Cooks Only.");
-        const orders = await Order.find({ status: 'pending' });
-        return int.reply({embeds: [createProfessionalEmbed("Pending Orders", orders.map(o => `\`${o.order_id}\`: ${o.item}`).join("\n") || "No orders.")]});
-    }
-
-    // [27] /deliver, [28] /deliverylist, [29] /setscript
-    if (cmd === 'deliver') {
-        if (!int.member.roles.cache.has(ROLE_DELIVERY)) return int.reply("Drivers Only.");
-        const o = await Order.findOne({ order_id: opt.getString('id'), status: 'ready' });
-        if (!o) return int.reply("Order not ready.");
-        
-        const guild = client.guilds.cache.get(o.guild_id);
-        
-        try {
-            const inv = await guild.channels.cache.random().createInvite();
-            o.status = 'delivering'; o.deliverer_id = int.user.id; await o.save();
-            const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`complete_${o.order_id}`).setLabel('Confirm').setStyle(ButtonStyle.Success));
-            await int.user.send({ content: `Invite: ${inv.url}`, components: [row] });
-            return int.reply("Briefing sent.");
-        } catch (e) {
-            return int.reply("This order is unavailable for Manual dispatch.");
-        }
-    }
-    if (cmd === 'deliverylist') {
-        if (!int.member.roles.cache.has(ROLE_DELIVERY)) return int.reply("Drivers Only.");
-        const orders = await Order.find({ status: 'ready' });
-        return int.reply({embeds: [createProfessionalEmbed("Ready Orders", orders.map(o => `\`${o.order_id}\`: ${o.item}`).join("\n") || "No orders.")]});
-    }
-    if (cmd === 'setscript') {
-        if (!int.member.roles.cache.has(ROLE_DELIVERY)) return int.reply("Drivers Only.");
-        await Script.findOneAndUpdate({ user_id: int.user.id }, { script: opt.getString('msg') }, { upsert: true });
-        return int.reply("Script saved.");
-    }
-
-    // [30] /stats, [31] /vacation, [32] /staff_buy, [33] /invite, [34] /support, [35] /rules
-    if (cmd === 'stats') {
-        const u = await User.findOne({ user_id: opt.getUser('user')?.id || int.user.id });
-        return int.reply({embeds: [createProfessionalEmbed("Stats", `Cooked: ${u?.cook_count_total || 0}\nDelivered: ${u?.deliver_count_total || 0}`)]});
-    }
-    if (cmd === 'vacation') {
-        const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`approve_${int.user.id}`).setLabel('Approve').setStyle(ButtonStyle.Success), new ButtonBuilder().setCustomId(`deny_${int.user.id}`).setLabel('Deny').setStyle(ButtonStyle.Danger));
-        client.channels.cache.get(CHAN_VACATION).send({ embeds: [createProfessionalEmbed("Vacation Request", `User: <@${int.user.id}>\nDays: ${opt.getInteger('days')}`)], components: [row] });
-        return int.reply("Request sent.");
-    }
-    if (cmd === 'staff_buy') {
-        if (uData.balance < 15000) return int.reply("Insufficient funds.");
-        uData.balance -= 15000; uData.double_stats_until = new Date(Date.now() + 30 * 86400000); await uData.save();
-        return int.reply("Double stats activated.");
-    }
-    if (cmd === 'invite') return int.reply("Invite [Sugar Rush](https://discord.com/oauth2/authorize?client_id=1454931242335076667&permissions=137440382017&integration_type=0&scope=applications.commands+bot)");
-    if (cmd === 'support') return int.reply(CONF_SUPPORT_SERVER);
-    if (cmd === 'rules') return int.reply({embeds: [createProfessionalEmbed("Rules", await fetchRules())]});
-
-    // [35] /help (ENSURED FUNCTIONAL)
-    if (cmd === 'help') {
+    // [8] HELP
+    if (commandName === 'help') {
         const fields = [
-            { name: "🛡️ Management", value: "`/generate_codes`, `/serverblacklist`, `/unserverblacklist`, `/warn`, `/fdo`, `/force_warn`, `/ban`, `/unban`, `/refund`, `/run_quota`" },
+            { name: "🛡️ Management", value: "`/generate_codes`, `/fdo`, `/force_warn`, `/run_quota`, `/ban`, `/unban`, `/refund`, `/serverblacklist`, `/unserverblacklist`" },
             { name: "💰 Economy", value: "`/balance`, `/daily`, `/tip`, `/redeem`, `/premium`" },
             { name: "📦 Ordering", value: "`/order`, `/super_order`, `/orderstatus`, `/orderinfo`, `/oinfo`, `/rate`, `/review`" },
             { name: "👨‍🍳 Staff", value: "`/claim`, `/cook`, `/orderlist`, `/deliver`, `/deliverylist`, `/setscript`, `/stats`, `/vacation`, `/staff_buy`" },
-            { name: "🔗 Utility", value: "`/help`, `/invite`, `/support`, `/rules`" }
+            { name: "🔗 Utility", value: "`/help`, `/invite`, `/support`, `/rules`, `/warn`" }
         ];
-        return int.reply({ embeds: [createProfessionalEmbed("📖 Sugar Rush Directory", "Complete Command Protocol", COLOR_MAIN).addFields(fields)] });
+        return interaction.reply({ embeds: [createEmbed("📖 Sugar Rush Directory", "Complete Command Protocol", COLOR_MAIN, fields)] });
     }
-});
 
-// [1] !eval prefix command
-client.on('messageCreate', async (m) => {
-    if (m.author.id === CONF_OWNER && m.content.startsWith("!eval")) {
-        try { m.channel.send(`\`\`\`js\n${util.inspect(await eval(m.content.slice(5)))}\n\`\`\``); } catch (e) { m.channel.send(`${e}`); }
+    // [1, 2] SYSTEM & DISCIPLINE
+    if (commandName === 'generate_codes') {
+        if (interaction.user.id !== CONF_OWNER) return interaction.reply({ embeds: [createEmbed("❌ Unauthorized", "Owner Only.", COLOR_FAIL)] });
+        const amt = options.getInteger('amount');
+        const codes = [];
+        for (let i = 0; i < amt; i++) {
+            const c = `VIP-${Math.random().toString(36).substring(2, 9).toUpperCase()}`;
+            await new VIPCode({ code: c }).save();
+            codes.push(c);
+        }
+        return interaction.reply({ embeds: [createEmbed("✅ Generated", `Created ${codes.length} codes.`, COLOR_SUCCESS)] });
     }
+
+    if (commandName === 'serverblacklist') {
+        if (interaction.user.id !== CONF_OWNER) return interaction.reply({ embeds: [createEmbed("❌ Unauthorized", "Owner Only.", COLOR_FAIL)] });
+        await new ServerBlacklist({ guild_id: options.getString('id'), reason: options.getString('reason') }).save();
+        return interaction.reply({ embeds: [createEmbed("✅ Server Blacklisted", `ID: ${options.getString('id')}`, COLOR_SUCCESS)] });
+    }
+
+    if (commandName === 'unserverblacklist') {
+        if (interaction.user.id !== CONF_OWNER) return interaction.reply({ embeds: [createEmbed("❌ Unauthorized", "Owner Only.", COLOR_FAIL)] });
+        await ServerBlacklist.deleteOne({ guild_id: options.getString('id') });
+        return interaction.reply({ embeds: [createEmbed("✅ Server Restored", `ID: ${options.getString('id')}`, COLOR_SUCCESS)] });
+    }
+
+    if (['warn', 'fdo', 'force_warn'].includes(commandName)) {
+        if (['fdo', 'force_warn'].includes(commandName) && !interaction.member.roles.cache.has(ROLE_MANAGER)) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Management Only.", COLOR_FAIL)] });
+        if (commandName === 'warn' && !interaction.member.roles.cache.has(ROLE_COOK) && !interaction.member.roles.cache.has(ROLE_MANAGER)) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Cooks/Management Only.", COLOR_FAIL)] });
+        
+        const o = await Order.findOne({ order_id: options.getString('id') });
+        if (!o) return interaction.reply({ embeds: [createEmbed("❌ Error", "Order not found.", COLOR_FAIL)] });
+        if (commandName === 'warn' && !['pending', 'claimed'].includes(o.status)) return interaction.reply({ embeds: [createEmbed("❌ Error", "Pre-cook orders only.", COLOR_FAIL)] });
+        if (commandName === 'fdo' && o.status !== 'ready') return interaction.reply({ embeds: [createEmbed("❌ Error", "Ready orders only.", COLOR_FAIL)] });
+        
+        const target = await User.findOne({ user_id: o.user_id }) || new User({ user_id: o.user_id });
+        const pen = await applyWarningLogic(target, options.getString('reason'));
+        if (commandName === 'warn') o.status = 'cancelled_warn'; if (commandName === 'fdo') o.status = 'cancelled_fdo'; await o.save();
+        return interaction.reply({ embeds: [createEmbed("✅ Action Logged", `Penalty: ${pen}`, COLOR_SUCCESS)] });
+    }
+
+    if (commandName === 'ban') {
+        if (!interaction.member.roles.cache.has(ROLE_MANAGER)) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Management Only.", COLOR_FAIL)] });
+        await User.findOneAndUpdate({ user_id: options.getString('uid') }, { service_ban_until: new Date(Date.now() + options.getInteger('days') * 86400000) });
+        return interaction.reply({ embeds: [createEmbed("✅ Banned", "User service ban applied.", COLOR_SUCCESS)] });
+    }
+
+    if (commandName === 'unban') {
+        if (!interaction.member.roles.cache.has(ROLE_MANAGER)) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Management Only.", COLOR_FAIL)] });
+        await User.findOneAndUpdate({ user_id: options.getString('uid') }, { service_ban_until: null, is_perm_banned: false });
+        return interaction.reply({ embeds: [createEmbed("✅ Unbanned", "User service restored.", COLOR_SUCCESS)] });
+    }
+
+    if (commandName === 'refund') {
+        if (!interaction.member.roles.cache.has(ROLE_MANAGER)) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Management Only.", COLOR_FAIL)] });
+        const o = await Order.findOne({ order_id: options.getString('id') });
+        await User.findOneAndUpdate({ user_id: o.user_id }, { $inc: { balance: 100 } });
+        o.status = 'refunded'; await o.save();
+        return interaction.reply({ embeds: [createEmbed("✅ Refunded", "Order refunded successfully.", COLOR_SUCCESS)] });
+    }
+
+    // [3, 4] ECONOMY & ORDERING
+    if (commandName === 'balance') return interaction.reply({ embeds: [createEmbed("💰 Vault", `Balance: **${userData.balance} Sugar Coins**`)] });
+    
+    if (commandName === 'daily') {
+        if (Date.now() - userData.last_daily < 86400000) return interaction.reply({ embeds: [createEmbed("⏰ Cooldown", "Please wait 24h.", COLOR_FAIL)] });
+        const pay = userData.vip_until > Date.now() ? 2000 : 1000;
+        userData.balance += pay; userData.last_daily = Date.now(); await userData.save();
+        return interaction.reply({ embeds: [createEmbed("💰 Daily Claimed", `+${pay} Sugar Coins.`, COLOR_SUCCESS)] });
+    }
+
+    if (commandName === 'tip') {
+        const amt = options.getInteger('amount');
+        const o = await Order.findOne({ order_id: options.getString('order_id') });
+        userData.balance -= amt; await userData.save();
+        await User.findOneAndUpdate({ user_id: o.chef_id }, { $inc: { balance: amt } });
+        return interaction.reply({ embeds: [createEmbed("💸 Tipped", "Tip sent to staff.", COLOR_SUCCESS)] });
+    }
+
+    if (commandName === 'order' || commandName === 'super_order') {
+        const isVip = userData.vip_until > Date.now();
+        let cost = (commandName === 'super_order' ? 150 : 100);
+        if (isVip) cost = Math.ceil(cost * 0.5);
+        
+        if (userData.balance < cost) return interaction.reply({ embeds: [createEmbed("❌ Insufficient Funds", `Need ${cost} Sugar Coins.`, COLOR_FAIL)] });
+        
+        const activeCount = await Order.countDocuments({ user_id: interaction.user.id, status: { $in: ['pending', 'claimed', 'cooking', 'ready'] } });
+        if (activeCount >= 3) return interaction.reply({ embeds: [createEmbed("❌ Limit Reached", "You have 3 active orders.", COLOR_FAIL)] });
+
+        const oid = Math.random().toString(36).substring(2, 8).toUpperCase();
+        await new Order({ order_id: oid, user_id: interaction.user.id, guild_id: interaction.guildId, item: options.getString('item'), is_vip: isVip, is_super: commandName === 'super_order' }).save();
+        userData.balance -= cost; await userData.save();
+
+        const title = commandName === 'super_order' ? "🚀 Priority Order Confirmed" : "🍩 Order Confirmed";
+        const fields = [
+            { name: "Order ID", value: `\`${oid}\``, inline: true },
+            { name: "Item", value: options.getString('item'), inline: true },
+            { name: "Cost", value: `${cost} Sugar Coins`, inline: true },
+            { name: "Status", value: "PENDING", inline: true }
+        ];
+        
+        return interaction.reply({ embeds: [createEmbed(title, "Thank you for choosing Sugar Rush. Your order has been sent to the kitchen.", commandName === 'super_order' ? COLOR_FAIL : COLOR_SUCCESS, fields)] });
+    }
+
+    if (commandName === 'orderstatus') {
+        const orders = await Order.find({ user_id: interaction.user.id, status: { $ne: 'delivered' } });
+        return interaction.reply({ embeds: [createEmbed("🍩 Active Orders", orders.map(o => `• \`${o.order_id}\`: ${o.status}`).join('\n') || "None.")] });
+    }
+
+    if (commandName === 'orderinfo' || commandName === 'oinfo') {
+        const o = await Order.findOne({ order_id: options.getString('id') });
+        return interaction.reply({ embeds: [createEmbed(`Info: ${o.order_id}`, `Item: ${o.item}\nStatus: ${o.status.toUpperCase()}`)] });
+    }
+
+    if (commandName === 'rate') {
+        const o = await Order.findOne({ order_id: options.getString('order_id') });
+        o.rating = options.getInteger('stars'); o.rated = true; await o.save();
+        return interaction.reply({ embeds: [createEmbed("⭐ Rated", "Thank you for your feedback!", COLOR_SUCCESS)] });
+    }
+
+    if (commandName === 'review') {
+        client.channels.cache.get(CHAN_RATINGS)?.send({ embeds: [createEmbed("Review", `**Stars:** ${options.getInteger('rating')}\n**Msg:** ${options.getString('comment')}`)] });
+        return interaction.reply({ embeds: [createEmbed("✅ Submitted", "Review published.", COLOR_SUCCESS)] });
+    }
+
+    // [5, 6, 7] STAFF
+    if (commandName === 'claim') {
+        if (!interaction.member.roles.cache.has(ROLE_COOK)) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Cooks only.", COLOR_FAIL)] });
+        await Order.findOneAndUpdate({ order_id: options.getString('id'), status: 'pending' }, { status: 'claimed', chef_id: interaction.user.id, chef_name: interaction.user.username });
+        return interaction.reply({ embeds: [createEmbed("👨‍🍳 Claimed", "Order assigned to you.", COLOR_SUCCESS)] });
+    }
+
+    if (commandName === 'cook') {
+        if (!interaction.member.roles.cache.has(ROLE_COOK)) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Cooks only.", COLOR_FAIL)] });
+        const o = await Order.findOne({ order_id: options.getString('id'), status: 'claimed', chef_id: interaction.user.id });
+        o.status = 'cooking'; await o.save();
+        setTimeout(async () => {
+            await Order.findOneAndUpdate({ order_id: o.order_id }, { status: 'ready', ready_at: new Date() });
+            client.channels.cache.get(CHAN_DELIVERY).send(`🥡 **Order Ready:** \`${o.order_id}\``);
+        }, 180000);
+        return interaction.reply({ embeds: [createEmbed("♨️ Cooking", "Timer started (3m).", COLOR_MAIN)] });
+    }
+
+    if (commandName === 'orderlist') {
+        if (!interaction.member.roles.cache.has(ROLE_COOK)) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Cooks only.", COLOR_FAIL)] });
+        const orders = await Order.find({ status: 'pending' });
+        return interaction.reply({ embeds: [createEmbed("📋 Kitchen Queue", orders.map(o => `• \`${o.order_id}\` | ${o.item}`).join('\n') || "Empty.")] });
+    }
+
+    if (commandName === 'deliver') {
+        if (!interaction.member.roles.cache.has(ROLE_DELIVERY)) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Drivers only.", COLOR_FAIL)] });
+        const o = await Order.findOne({ order_id: options.getString('id'), status: 'ready' });
+        
+        try {
+            const guild = client.guilds.cache.get(o.guild_id);
+            const inv = await guild.channels.cache.random().createInvite();
+            o.status = 'delivering'; o.deliverer_id = interaction.user.id; await o.save();
+            const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`complete_${o.order_id}`).setLabel('Confirm Delivery').setStyle(ButtonStyle.Success));
+            await interaction.user.send({ content: `Invite: ${inv.url}`, components: [row] }); 
+            return interaction.reply({ embeds: [createEmbed("📫 Dispatch", "Briefing sent to DMs.", COLOR_SUCCESS)] });
+        } catch (e) {
+            return interaction.reply({ embeds: [createEmbed("❌ Error", "This order is unavailable for Manual dispatch.", COLOR_FAIL)] });
+        }
+    }
+
+    if (commandName === 'deliverylist') {
+        if (!interaction.member.roles.cache.has(ROLE_DELIVERY)) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Drivers only.", COLOR_FAIL)] });
+        const orders = await Order.find({ status: 'ready' });
+        return interaction.reply({ embeds: [createEmbed("📦 Delivery Queue", orders.map(o => `• \`${o.order_id}\` | <@${o.user_id}>`).join('\n') || "Empty.")] });
+    }
+
+    if (commandName === 'setscript') {
+        if (!interaction.member.roles.cache.has(ROLE_DELIVERY)) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Drivers only.", COLOR_FAIL)] });
+        await Script.findOneAndUpdate({ user_id: interaction.user.id }, { script: options.getString('message') }, { upsert: true });
+        return interaction.reply({ embeds: [createEmbed("✅ Saved", "Delivery script updated.", COLOR_SUCCESS)] });
+    }
+
+    if (commandName === 'stats') {
+        const u = await User.findOne({ user_id: options.getUser('user')?.id || interaction.user.id });
+        return interaction.reply({ embeds: [createEmbed("📊 Statistics", `👨‍🍳 Cooks: ${u?.cook_count_total || 0}\n🚴 Deliveries: ${u?.deliver_count_total || 0}`)] });
+    }
+
+    if (commandName === 'vacation') {
+        const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`approve_${interaction.user.id}`).setLabel('Approve').setStyle(ButtonStyle.Success));
+        client.channels.cache.get(CHAN_VACATION).send({ content: "Request", components: [row] });
+        return interaction.reply({ embeds: [createEmbed("✅ Request Sent", "Vacation request submitted.", COLOR_SUCCESS)] });
+    }
+
+    if (commandName === 'staff_buy') {
+        userData.balance -= 15000; await userData.save();
+        return interaction.reply({ embeds: [createEmbed("✅ Upgraded", "Double Stats Active (30 Days).", COLOR_SUCCESS)] });
+    }
+
+    // [8] UTILITY
+    if (commandName === 'run_quota') { if (!interaction.member.roles.cache.has(ROLE_MANAGER)) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Unauthorized.", COLOR_FAIL)] }); return executeQuotaRun(interaction); }
+    if (commandName === 'invite') {
+        const link = `https://discord.com/api/oauth2/authorize?client_id=${client.user.id}&permissions=117761&scope=bot%20applications.commands`;
+        return interaction.reply({ embeds: [createEmbed("🤖 Bot Invite", `[Click here to invite Sugar Rush](${link})`, COLOR_MAIN)] });
+    }
+    if (commandName === 'support') return interaction.reply({ embeds: [createEmbed("🆘 Support", CONF_SUPPORT_SERVER, COLOR_MAIN)] });
+    if (commandName === 'rules') return interaction.reply({ embeds: [createEmbed("📖 Rules", await fetchRules())] });
 });
 
 client.on('ready', async () => { 
     mongoose.connect(CONF_MONGO); 
-    console.log("Final Absolute Build Online.");
+    console.log("Sugar Rush Build Online.");
     
-    // AUTO-REGISTER COMMANDS ON DISCORD
     const commands = [
-        { name: 'generate_codes', description: 'Generate VIP codes', options: [{ name: 'amt', type: 4, description: 'Amount', required: true }] },
+        { name: 'generate_codes', description: 'Generate VIP codes', options: [{ name: 'amount', type: 4, description: 'Amount', required: true }] },
         { name: 'serverblacklist', description: 'Blacklist a server', options: [{ name: 'id', type: 3, description: 'Guild ID', required: true }, { name: 'reason', type: 3, description: 'Reason', required: true }] },
         { name: 'unserverblacklist', description: 'Unblacklist a server', options: [{ name: 'id', type: 3, description: 'Guild ID', required: true }] },
         { name: 'warn', description: 'Warn a user', options: [{ name: 'id', type: 3, description: 'Order ID', required: true }, { name: 'reason', type: 3, description: 'Reason', required: true }] },
@@ -407,7 +525,7 @@ client.on('ready', async () => {
         { name: 'run_quota', description: 'Run quota check' },
         { name: 'balance', description: 'Check balance' },
         { name: 'daily', description: 'Claim daily' },
-        { name: 'tip', description: 'Tip staff', options: [{ name: 'id', type: 3, description: 'Order ID', required: true }, { name: 'amt', type: 4, description: 'Amount', required: true }] },
+        { name: 'tip', description: 'Tip staff', options: [{ name: 'order_id', type: 3, description: 'Order ID', required: true }, { name: 'amount', type: 4, description: 'Amount', required: true }] },
         { name: 'redeem', description: 'Redeem VIP code', options: [{ name: 'code', type: 3, description: 'Code', required: true }] },
         { name: 'premium', description: 'Premium store' },
         { name: 'order', description: 'Order item', options: [{ name: 'item', type: 3, description: 'Item', required: true }] },
@@ -415,16 +533,16 @@ client.on('ready', async () => {
         { name: 'orderstatus', description: 'Check status' },
         { name: 'orderinfo', description: 'Check info', options: [{ name: 'id', type: 3, description: 'Order ID', required: true }] },
         { name: 'oinfo', description: 'Check info alias', options: [{ name: 'id', type: 3, description: 'Order ID', required: true }] },
-        { name: 'rate', description: 'Rate order', options: [{ name: 'id', type: 3, description: 'Order ID', required: true }, { name: 'stars', type: 4, description: 'Stars', required: true }, { name: 'fb', type: 3, description: 'Feedback', required: true }] },
-        { name: 'review', description: 'Leave review', options: [{ name: 'rating', type: 4, description: 'Rating', required: true }, { name: 'msg', type: 3, description: 'Message', required: true }] },
+        { name: 'rate', description: 'Rate order', options: [{ name: 'order_id', type: 3, description: 'Order ID', required: true }, { name: 'stars', type: 4, description: 'Stars', required: true }, { name: 'feedback', type: 3, description: 'Feedback', required: false }] },
+        { name: 'review', description: 'Leave review', options: [{ name: 'rating', type: 4, description: 'Rating', required: true }, { name: 'comment', type: 3, description: 'Message', required: true }] },
         { name: 'claim', description: 'Claim order', options: [{ name: 'id', type: 3, description: 'Order ID', required: true }] },
-        { name: 'cook', description: 'Cook order', options: [{ name: 'id', type: 3, description: 'Order ID', required: true }] },
+        { name: 'cook', description: 'Cook order', options: [{ name: 'id', type: 3, description: 'Order ID', required: true }, { name: 'image', type: 11, description: 'Proof 1', required: false }, { name: 'link', type: 3, description: 'Link 1', required: false }, { name: 'image2', type: 11, description: 'Proof 2', required: false }, { name: 'link2', type: 3, description: 'Link 2', required: false }, { name: 'image3', type: 11, description: 'Proof 3', required: false }, { name: 'link3', type: 3, description: 'Link 3', required: false }] },
         { name: 'orderlist', description: 'View queue' },
         { name: 'deliver', description: 'Deliver order', options: [{ name: 'id', type: 3, description: 'Order ID', required: true }] },
         { name: 'deliverylist', description: 'View delivery queue' },
-        { name: 'setscript', description: 'Set delivery script', options: [{ name: 'msg', type: 3, description: 'Message', required: true }] },
+        { name: 'setscript', description: 'Set delivery script', options: [{ name: 'message', type: 3, description: 'Message', required: true }] },
         { name: 'stats', description: 'View stats', options: [{ name: 'user', type: 6, description: 'User', required: false }] },
-        { name: 'vacation', description: 'Request vacation', options: [{ name: 'days', type: 4, description: 'Days', required: true }] },
+        { name: 'vacation', description: 'Request vacation', options: [{ name: 'duration', type: 4, description: 'Days', required: true }] },
         { name: 'staff_buy', description: 'Buy buff' },
         { name: 'invite', description: 'Get invite' },
         { name: 'support', description: 'Get support' },
@@ -433,5 +551,10 @@ client.on('ready', async () => {
     ];
     await client.application.commands.set(commands);
     console.log("Commands registered on Discord.");
+    setInterval(async () => { 
+        const now = new Date(); 
+        if (now.getDay() === 0 && now.getHours() === 0 && now.getMinutes() === 0) await executeQuotaRun(null); 
+    }, 60000); 
 });
+
 client.login(CONF_TOKEN);
