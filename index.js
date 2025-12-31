@@ -2,7 +2,7 @@
  * ============================================================================
  * SUGAR RUSH - MASTER DISCORD AUTOMATION INFRASTRUCTURE
  * ============================================================================
- * * VERSION: 82.6.7 (FINAL: APPEAL INFO ADDED - FULL SYNC)
+ * * VERSION: 82.6.10 (FINAL: REDEEM RESTORED - ZERO OMISSIONS)
  * * ----------------------------------------------------------------------------
  * 📜 FULL COMMAND REGISTER (35 TOTAL COMMANDS):
  *
@@ -151,6 +151,7 @@ const OrderSchema = new mongoose.Schema({
     delivery_started_at: Date, 
     ready_at: Date,
     images: [String],
+    kitchen_msg_id: String,
     rating: { type: Number, default: 0 },
     feedback: { type: String, default: "" },
     rated: { type: Boolean, default: false }
@@ -236,6 +237,35 @@ async function executeQuotaRun(interaction = null) {
     const leaders = topStaff.map((u, i) => `\`#${i+1}\` <@${u.user_id}>: **${u.cook_count_week + u.deliver_count_week}**`).join('\n') || "None.";
     client.channels.cache.get(CHAN_QUOTA)?.send({ content: "@here 📢 **WEEKLY AUDIT**", embeds: [createEmbed("📊 Top Performers", leaders, COLOR_MAIN)] });
     if (interaction) return interaction.editReply({ embeds: [createEmbed("✅ Audit Complete", "Weekly quota run finalized.", COLOR_SUCCESS)] });
+}
+
+async function updateOrderArchive(orderId) {
+    try {
+        const channel = await client.channels.fetch(CHAN_BACKUP).catch(() => null);
+        const order = await Order.findOne({ order_id: orderId });
+        if (!channel || !order) return;
+        
+        let color = COLOR_MAIN;
+        if (order.is_super) color = COLOR_FAIL;
+        else if (order.is_vip) color = COLOR_VIP;
+
+        const embed = createEmbed(`Archive: #${order.order_id}`, null, color, [
+            { name: 'Status', value: `\`${order.status.toUpperCase()}\``, inline: true },
+            { name: 'Customer', value: `<@${order.user_id}>`, inline: true },
+            { name: 'Chef', value: order.chef_name || 'Pending', inline: true },
+            { name: 'Courier', value: order.deliverer_id ? `<@${order.deliverer_id}>` : 'Pending', inline: true }
+        ]);
+        if (order.images?.length > 0) embed.setImage(order.images[0]);
+        
+        if (!order.backup_msg_id) {
+            const msg = await channel.send({ embeds: [embed] });
+            order.backup_msg_id = msg.id;
+            await order.save();
+        } else {
+            const msg = await channel.messages.fetch(order.backup_msg_id).catch(() => null);
+            if (msg) await msg.edit({ embeds: [embed] });
+        }
+    } catch (error) {}
 }
 
 // ============================================================================
@@ -384,6 +414,26 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({ embeds: [createEmbed("💸 Tipped", "Tip sent to staff.", COLOR_SUCCESS)] });
     }
 
+    if (commandName === 'redeem') {
+        const code = await VIPCode.findOne({ code: options.getString('code'), is_used: false });
+        if (!code) return interaction.reply({ embeds: [createEmbed("❌ Invalid Code", "This code is invalid or has already been used.", COLOR_FAIL)], ephemeral: true });
+        
+        const now = new Date();
+        const add = 30 * 86400000;
+        const current = userData.vip_until > now ? userData.vip_until.getTime() : now.getTime();
+        userData.vip_until = new Date(current + add);
+        
+        code.is_used = true; 
+        await userData.save(); 
+        await code.save();
+        
+        return interaction.reply({ embeds: [createEmbed("💎 VIP Redeemed", `**Status Active Until:** ${userData.vip_until.toDateString()}\n\nThank you for your support!`, COLOR_VIP)] });
+    }
+
+    if (commandName === 'premium') {
+        return interaction.reply({ embeds: [createEmbed("💎 Premium Store", `**[Click to Visit Shop](${CONF_STORE})**\n\n• 50% Off Orders\n• 2x Daily Rewards\n• Gold Profile Status`, COLOR_VIP)] });
+    }
+
     if (commandName === 'order' || commandName === 'super_order') {
         const isVip = userData.vip_until > Date.now();
         let cost = (commandName === 'super_order' ? 150 : 100);
@@ -395,10 +445,21 @@ client.on('interactionCreate', async (interaction) => {
         if (activeCount >= 3) return interaction.reply({ embeds: [createEmbed("❌ Limit Reached", "You have 3 active orders.", COLOR_FAIL)] });
 
         const oid = Math.random().toString(36).substring(2, 8).toUpperCase();
-        await new Order({ order_id: oid, user_id: interaction.user.id, guild_id: interaction.guildId, item: options.getString('item'), is_vip: isVip, is_super: commandName === 'super_order' }).save();
+        
+        let kitchenMsgId = null;
+        let title = "🍩 New Order", col = COLOR_MAIN, content = null, recTitle = "✅ Order Authorized";
+        if (commandName === 'super_order') { title = "🚀 SUPER ORDER"; col = COLOR_FAIL; content = "@here 🚀 **PRIORITY**"; recTitle = "🚀 Priority Order Confirmed"; }
+        else if (isVip) { title = "👑 VIP Order"; col = COLOR_VIP; recTitle = "👑 VIP Order Authorized"; }
+
+        const cookChan = client.channels.cache.get(CHAN_COOK);
+        if (cookChan) {
+            const msg = await cookChan.send({ content: content, embeds: [createEmbed(title, `ID: ${oid}\nItem: ${options.getString('item')}`, col)] });
+            kitchenMsgId = msg.id;
+        }
+
+        await new Order({ order_id: oid, user_id: interaction.user.id, guild_id: interaction.guildId, item: options.getString('item'), is_vip: isVip, is_super: commandName === 'super_order', kitchen_msg_id: kitchenMsgId }).save();
         userData.balance -= cost; await userData.save();
 
-        const title = commandName === 'super_order' ? "🚀 Priority Order Confirmed" : "🍩 Order Confirmed";
         const fields = [
             { name: "Order ID", value: `\`${oid}\``, inline: true },
             { name: "Item", value: options.getString('item'), inline: true },
@@ -406,7 +467,8 @@ client.on('interactionCreate', async (interaction) => {
             { name: "Status", value: "PENDING", inline: true }
         ];
         
-        return interaction.reply({ embeds: [createEmbed(title, "Thank you for choosing Sugar Rush. Your order has been sent to the kitchen.", commandName === 'super_order' ? COLOR_FAIL : COLOR_SUCCESS, fields)] });
+        updateOrderArchive(oid);
+        return interaction.reply({ embeds: [createEmbed(recTitle, "Thank you for choosing Sugar Rush. Your order has been sent to the kitchen.", col, fields)] });
     }
 
     if (commandName === 'orderstatus') {
@@ -433,8 +495,41 @@ client.on('interactionCreate', async (interaction) => {
     // [5, 6, 7] STAFF
     if (commandName === 'claim') {
         if (!interaction.member.roles.cache.has(ROLE_COOK)) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Cooks only.", COLOR_FAIL)] });
-        await Order.findOneAndUpdate({ order_id: options.getString('id'), status: 'pending' }, { status: 'claimed', chef_id: interaction.user.id, chef_name: interaction.user.username });
-        return interaction.reply({ embeds: [createEmbed("👨‍🍳 Claimed", "Order assigned to you.", COLOR_SUCCESS)] });
+        const o = await Order.findOne({ order_id: options.getString('id'), status: 'pending' });
+        if (!o) return interaction.reply({ embeds: [createEmbed("❌ Error", "Invalid Order ID.", COLOR_FAIL)] });
+        
+        o.status = 'claimed'; 
+        o.chef_id = interaction.user.id; 
+        o.chef_name = interaction.user.username; 
+        await o.save();
+        
+        if (o.kitchen_msg_id) {
+            try {
+                const chan = client.channels.cache.get(CHAN_COOK);
+                const msg = await chan.messages.fetch(o.kitchen_msg_id);
+                const oldEmbed = msg.embeds[0];
+                const newEmbed = new EmbedBuilder(oldEmbed.data)
+                    .setTitle(`👨‍🍳 CLAIMED: ${oldEmbed.title}`) 
+                    .addFields({ name: 'Chef', value: `<@${interaction.user.id}>` })
+                    .setColor(COLOR_SUCCESS); 
+                await msg.edit({ content: null, embeds: [newEmbed] });
+            } catch (e) {}
+        }
+        
+        updateOrderArchive(o.order_id);
+
+        setTimeout(async () => {
+            const check = await Order.findOne({ order_id: o.order_id });
+            if (check && check.status === 'claimed') {
+                check.status = 'pending';
+                check.chef_id = null;
+                check.chef_name = null;
+                await check.save();
+                client.channels.cache.get(CHAN_COOK)?.send({ embeds: [createEmbed("⚠️ Claim Expired", `Order \`${check.order_id}\` is back in queue (5m Timeout).`, COLOR_FAIL)] });
+            }
+        }, 300000);
+
+        return interaction.reply({ embeds: [createEmbed("👨‍🍳 Claimed", "Order assigned to you. You have 5 minutes to cook.", COLOR_SUCCESS)] });
     }
 
     if (commandName === 'cook') {
@@ -443,7 +538,7 @@ client.on('interactionCreate', async (interaction) => {
         o.status = 'cooking'; await o.save();
         setTimeout(async () => {
             await Order.findOneAndUpdate({ order_id: o.order_id }, { status: 'ready', ready_at: new Date() });
-            client.channels.cache.get(CHAN_DELIVERY).send(`🥡 **Order Ready:** \`${o.order_id}\``);
+            client.channels.cache.get(CHAN_DELIVERY).send({ embeds: [createEmbed("🥡 Order Ready", `**ID:** ${o.order_id}\n**Customer:** <@${o.user_id}>`, COLOR_MAIN)] });
         }, 180000);
         return interaction.reply({ embeds: [createEmbed("♨️ Cooking", "Timer started (3m).", COLOR_MAIN)] });
     }
