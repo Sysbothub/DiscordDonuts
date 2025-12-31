@@ -2,7 +2,7 @@
  * ============================================================================
  * SUGAR RUSH - MASTER DISCORD AUTOMATION INFRASTRUCTURE
  * ============================================================================
- * * VERSION: 82.6.10 (FINAL: REDEEM RESTORED - ZERO OMISSIONS)
+ * * VERSION: 82.6.11 (FINAL: FDO VERIFIED)
  * * ----------------------------------------------------------------------------
  * 📜 FULL COMMAND REGISTER (35 TOTAL COMMANDS):
  *
@@ -14,7 +14,7 @@
  *
  * [2] MANAGEMENT & DISCIPLINE
  * • /warn [id] [reason]       : (Cooks/Mgmt) Warns user. Pre-cooking ONLY.
- * • /fdo [id] [reason]        : (Mgmt) Force Discipline. Pre-delivery ONLY.
+ * • /fdo [id] [reason]        : (Mgmt) Force Discipline. Ready Orders ONLY.
  * • /force_warn [id] [reason] : (Mgmt) Force Warn. Applied to ANY status.
  * • /ban [uid] [days]         : Service bans a user from ordering.
  * • /unban [uid]              : Removes service ban from a user.
@@ -361,6 +361,7 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({ embeds: [createEmbed("✅ Server Restored", `ID: ${options.getString('id')}`, COLOR_SUCCESS)] });
     }
 
+    // --- FDO & WARNING LOGIC ---
     if (['warn', 'fdo', 'force_warn'].includes(commandName)) {
         if (['fdo', 'force_warn'].includes(commandName) && !interaction.member.roles.cache.has(ROLE_MANAGER)) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Management Only.", COLOR_FAIL)] });
         if (commandName === 'warn' && !interaction.member.roles.cache.has(ROLE_COOK) && !interaction.member.roles.cache.has(ROLE_MANAGER)) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Cooks/Management Only.", COLOR_FAIL)] });
@@ -457,7 +458,17 @@ client.on('interactionCreate', async (interaction) => {
             kitchenMsgId = msg.id;
         }
 
-        await new Order({ order_id: oid, user_id: interaction.user.id, guild_id: interaction.guildId, item: options.getString('item'), is_vip: isVip, is_super: commandName === 'super_order', kitchen_msg_id: kitchenMsgId }).save();
+        await new Order({ 
+            order_id: oid, 
+            user_id: interaction.user.id, 
+            guild_id: interaction.guildId, 
+            channel_id: interaction.channelId, 
+            item: options.getString('item'), 
+            is_vip: isVip, 
+            is_super: commandName === 'super_order', 
+            kitchen_msg_id: kitchenMsgId 
+        }).save();
+        
         userData.balance -= cost; await userData.save();
 
         const fields = [
@@ -532,7 +543,6 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({ embeds: [createEmbed("👨‍🍳 Claimed", "Order assigned to you. You have 5 minutes to cook.", COLOR_SUCCESS)] });
     }
 
-    // --- PATCHED COOK LOGIC ---
     if (commandName === 'cook') {
         if (!interaction.member.roles.cache.has(ROLE_COOK)) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Cooks only.", COLOR_FAIL)] });
         
@@ -565,7 +575,6 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({ embeds: [createEmbed("📋 Kitchen Queue", orders.map(o => `• \`${o.order_id}\` | ${o.item}`).join('\n') || "Empty.")] });
     }
 
-    // --- PATCHED DELIVER LOGIC ---
     if (commandName === 'deliver') {
         if (!interaction.member.roles.cache.has(ROLE_DELIVERY)) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Drivers only.", COLOR_FAIL)] });
         
@@ -574,17 +583,22 @@ client.on('interactionCreate', async (interaction) => {
         
         try {
             const guild = client.guilds.cache.get(o.guild_id);
-            const inv = await guild.channels.cache.random().createInvite();
-            o.status = 'delivering'; o.deliverer_id = interaction.user.id; await o.save();
+            // FAIL-SAFE: If this fails, code stops here and jumps to catch.
+            const inv = await guild.channels.cache.random().createInvite(); 
+            
+            o.status = 'delivering'; 
+            o.deliverer_id = interaction.user.id; 
+            await o.save();
             
             const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`complete_${o.order_id}`).setLabel('Confirm Delivery').setStyle(ButtonStyle.Success));
-            
             const proofList = o.images && o.images.length > 0 ? o.images.map((l, i) => `**Proof ${i+1}:** ${l}`).join('\n') : "No proofs attached.";
+            
             await interaction.user.send({ content: `**📦 DELIVERY DISPATCH**\n\n**Destination:** ${inv.url}\n**Customer:** <@${o.user_id}>\n\n**🍳 PROOFS:**\n${proofList}`, components: [row] }); 
             
             return interaction.reply({ embeds: [createEmbed("📫 Dispatch", "Briefing sent to DMs.", COLOR_SUCCESS)] });
         } catch (e) {
-            return interaction.reply({ embeds: [createEmbed("❌ Error", "This order is unavailable for Manual dispatch.", COLOR_FAIL)] });
+            // SAFE BLOCK: Returns error, leaves order in 'ready' status for Auto-System
+            return interaction.reply({ embeds: [createEmbed("❌ Dispatch Failed", "Invite creation blocked. Order left in 'Ready' state for Auto-System.", COLOR_FAIL)] });
         }
     }
 
@@ -672,6 +686,31 @@ client.on('ready', async () => {
     setInterval(async () => { 
         const now = new Date(); 
         if (now.getDay() === 0 && now.getHours() === 0 && now.getMinutes() === 0) await executeQuotaRun(null); 
+
+        // --- NEW FEATURE: AUTO DELIVERY SYSTEM (20 MIN CHECK) ---
+        try {
+            const staleThreshold = new Date(Date.now() - 20 * 60 * 1000); // 20 minutes ago
+            const staleOrders = await Order.find({ status: 'ready', ready_at: { $lt: staleThreshold } });
+            
+            for (const order of staleOrders) {
+                const channel = await client.channels.fetch(order.channel_id).catch(() => null);
+                
+                // FORMAT PROOFS FOR CHANNEL
+                const proofList = order.images && order.images.length > 0 ? order.images.map((l, i) => `**Proof ${i+1}:** ${l}`).join('\n') : "No proofs attached.";
+
+                if (channel) {
+                    const embed = createEmbed("📦 Order Delivered", 
+                        `Hello <@${order.user_id}>,\n\nYour order has been automatically processed for delivery to ensure timely service.\n\n**Order ID:** \`${order.order_id}\`\n**Item:** ${order.item}\n**Status:** Completed\n\n**Kitchen Proofs:**\n${proofList}\n\nThank you for choosing Sugar Rush.`,
+                        COLOR_SUCCESS
+                    );
+                    await channel.send({ content: `<@${order.user_id}>`, embeds: [embed] }).catch(() => {});
+                }
+                order.status = 'delivered';
+                order.deliverer_id = 'SYSTEM';
+                await order.save();
+            }
+        } catch (e) { console.error("Auto-Delivery Error:", e); }
+
     }, 60000); 
 });
 
