@@ -700,9 +700,8 @@ setInterval(async () => {
         const serverCount = client.guilds.cache.size;
 
         const statuses = [
-            { name: `Servers: ${serverCount}`, type: ActivityType.Watching },
-            { name: `/order | Sugar Rush`, type: ActivityType.Playing },
-            { name: `${pendingCount} orders in queue`, type: ActivityType.Watching }
+            { name: ` Total Servers: ${serverCount}`, type: ActivityType.Watching },
+            { name: `/order | Sugar Rush`, type: ActivityType.Playing }
         ];
 
         client.user.setPresence({
