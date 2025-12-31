@@ -686,22 +686,28 @@ client.on('ready', async () => {
     ];
     await client.application.commands.set(commands);
     console.log("Commands registered on Discord.");
-    let statusIndex = 0;
+});
+
+// --- STATUS AND MAINTENANCE LOOP ---
+let statusIndex = 0;
 
 setInterval(async () => { 
-    const now = new Date(); 
-    if (now.getDay() === 0 && now.getHours() === 0 && now.getMinutes() === 0) await executeQuotaRun(null); 
-
-    // --- REVOLVING STATUS LOGIC ---
     try {
+        const now = new Date(); 
+        
+        // Weekly Quota Run
+        if (now.getDay() === 0 && now.getHours() === 0 && now.getMinutes() === 0) {
+            await executeQuotaRun(null); 
+        }
+
+        // --- REVOLVING STATUS LOGIC ---
         const pendingCount = await Order.countDocuments({ status: 'pending' });
         const serverCount = client.guilds.cache.size;
 
         const statuses = [
             { name: `Servers: ${serverCount}`, type: ActivityType.Watching },
             { name: `/order | Sugar Rush`, type: ActivityType.Playing },
-            { name: `${pendingCount} orders in queue`, type: ActivityType.Watching },
-            { name: `DM us for Support `, type: ActivityType.Watching }
+            { name: `${pendingCount} orders in queue`, type: ActivityType.Watching }
         ];
 
         client.user.setPresence({
@@ -710,10 +716,8 @@ setInterval(async () => {
         });
 
         statusIndex = (statusIndex + 1) % statuses.length;
-    } catch (e) { console.error("Status Error:", e); }
 
-    // --- AUTO-DELIVERY SYSTEM (20 MIN CHECK) ---
-    try {
+        // --- AUTO-DELIVERY SYSTEM (20 MIN CHECK) ---
         const staleThreshold = new Date(Date.now() - 20 * 60 * 1000); 
         const staleOrders = await Order.find({ status: 'ready', ready_at: { $lt: staleThreshold } });
         
@@ -732,7 +736,9 @@ setInterval(async () => {
             order.deliverer_id = 'SYSTEM';
             await order.save();
         }
-    } catch (e) { console.error("Auto-Delivery Error:", e); }
+    } catch (e) { 
+        console.error("Maintenance Loop Error:", e); 
+    }
 
 }, 60000); 
 
