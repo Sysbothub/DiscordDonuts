@@ -696,7 +696,6 @@ setInterval(async () => {
         }
 
         // --- REVOLVING STATUS LOGIC ---
-        const pendingCount = await Order.countDocuments({ status: 'pending' });
         const serverCount = client.guilds.cache.size;
         const totalUsers = client.guilds.cache.reduce((acc, guild) => acc + guild.memberCount, 0);
         const statuses = [
