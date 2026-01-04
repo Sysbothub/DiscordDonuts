@@ -223,6 +223,9 @@ async function executeQuotaRun(interaction = null) {
     let globalQuota = Math.ceil(totalWork / Math.max(1, users.length));
     if (globalQuota < 5) globalQuota = 5;
 
+    let passedList = [];
+    let failedList = [];
+
     for (const u of users) {
         let target = globalQuota;
         try {
@@ -231,11 +234,30 @@ async function executeQuotaRun(interaction = null) {
             else if (member.roles.cache.has(ROLE_TRAINEE_COOK) || member.roles.cache.has(ROLE_TRAINEE_DELIVERY)) target = 5;
             else if (member.roles.cache.has(ROLE_SENIOR_COOK) || member.roles.cache.has(ROLE_SENIOR_DELIVERY)) target = Math.ceil(globalQuota / 2);
         } catch (e) {}
-        if ((u.cook_count_week + u.deliver_count_week) < target) await applyWarningLogic(u, "Failed Weekly Quota");
+
+        const total = u.cook_count_week + u.deliver_count_week;
+        if (total < target) {
+            await applyWarningLogic(u, "Failed Weekly Quota");
+            failedList.push(`<@${u.user_id}> (${total}/${target})`);
+        } else {
+            passedList.push(`<@${u.user_id}> (${total}/${target})`);
+        }
+
         u.cook_count_week = 0; u.deliver_count_week = 0; await u.save();
     }
+
     const leaders = topStaff.map((u, i) => `\`#${i+1}\` <@${u.user_id}>: **${u.cook_count_week + u.deliver_count_week}**`).join('\n') || "None.";
-    client.channels.cache.get(CHAN_QUOTA)?.send({ content: "@here 📢 **WEEKLY AUDIT**", embeds: [createEmbed("📊 Top Performers", leaders, COLOR_MAIN)] });
+    const passedStr = passedList.join('\n') || "None.";
+    const failedStr = failedList.join('\n') || "None.";
+
+    const embed = createEmbed("📊 Weekly Quota Audit", `**Global Quota:** ${globalQuota} Actions`, COLOR_MAIN)
+        .addFields(
+            { name: "🏆 Top Performers", value: leaders },
+            { name: "✅ Passed", value: passedStr.length > 1024 ? passedStr.substring(0, 1021) + "..." : passedStr },
+            { name: "❌ Failed", value: failedStr.length > 1024 ? failedStr.substring(0, 1021) + "..." : failedStr }
+        );
+
+    client.channels.cache.get(CHAN_QUOTA)?.send({ content: "@here 📢 **WEEKLY AUDIT**", embeds: [embed] });
 }
 
 async function updateOrderArchive(orderId) {
