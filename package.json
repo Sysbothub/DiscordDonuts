@@ -1,20 +1,18 @@
 {
   "name": "sugar-rush-bot",
-  "version": "38.0.0",
-  "description": "Master Automation Infrastructure for Sugar Rush",
+  "version": "82.6.11",
+  "description": "Sugar Rush Master Infrastructure with Trello Integration",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "discord.js": "^14.14.1",
-    "mongoose": "^8.1.1",
-    "googleapis": "^131.0.0",
-    "dotenv": "^16.4.1"
+    "discord.js": "^14.14.0",
+    "dotenv": "^16.3.1",
+    "mongoose": "^8.0.3",
+    "trello-node-api": "^0.0.9"
   },
   "engines": {
-    "node": ">=16.11.0"
-  },
-  "author": "Sugar Rush Management",
-  "license": "ISC"
+    "node": ">=16.9.0"
+  }
 }
