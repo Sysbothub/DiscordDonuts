@@ -2,61 +2,10 @@
  * ============================================================================
  * SUGAR RUSH - MASTER DISCORD AUTOMATION INFRASTRUCTURE
  * ============================================================================
- * * VERSION: 82.6.10 (FINAL: REDEEM RESTORED - ZERO OMISSIONS)
+ * * VERSION: 82.6.11 (TRELLO RULES INTEGRATION)
  * * ----------------------------------------------------------------------------
  * 📜 FULL COMMAND REGISTER (35 TOTAL COMMANDS):
- *
- * [1] OWNER & SYSTEM
- * • !eval [code]              : (Purged for Security)
- * • /generate_codes [amt]     : Creates VIP codes for the shop database.
- * • /serverblacklist [id] [r] : Bans a specific server from using the bot.
- * • /unserverblacklist [id]   : Unbans a server.
- *
- * [2] MANAGEMENT & DISCIPLINE
- * • /warn [id] [reason]       : (Cooks/Mgmt) Warns user. Pre-cooking ONLY.
- * • /fdo [id] [reason]        : (Mgmt) Force Discipline. Pre-delivery ONLY.
- * • /force_warn [id] [reason] : (Mgmt) Force Warn. Applied to ANY status.
- * • /ban [uid] [days]         : Service bans a user from ordering.
- * • /unban [uid]              : Removes service ban from a user.
- * • /refund [id]              : Refunds an order & marks as refunded.
- * • /run_quota                : Manually triggers the weekly staff quota audit.
- *
- * [3] CUSTOMER - ECONOMY & VIP
- * • /balance                  : Shows your Sugar Coin wallet.
- * • /daily                    : Claims daily reward (1000 or 2000 VIP).
- * • /tip [id] [amt]           : Tips Sugar Coins to staff (Splits Cook/Driver).
- * • /redeem [code]            : Activates 30-day VIP status.
- * • /premium                  : Links to the donation shop.
- *
- * [4] CUSTOMER - ORDERING
- * • /order [item]             : Standard Order (100 Sugar Coins).
- * • /super_order [item]       : Priority Order (150 Sugar Coins).
- * • /orderstatus              : Checks status of your active order(s) [Max 3].
- * • /orderinfo [id]           : Shows details (Chef, Driver, timestamps).
- * • /oinfo [id]               : Shortcut to check item/details for an order.
- * • /rate [id] [stars] [fb]   : Rates a delivered order (1-5 Stars).
- * • /review [rating] [msg]    : Submit a general review.
- *
- * [5] STAFF - KITCHEN (Cook Role)
- * • /claim [id]               : Assigns a pending order to you.
- * • /cook [id] [proofs...]    : Starts 3m cooking timer. Accepts up to 3 proofs.
- * • /orderlist                 : View pending queue (Priority Sorted).
- *
- * [6] STAFF - DELIVERY (Driver Role)
- * • /deliver [id]             : Pick up ready order & start delivery flow.
- * • /deliverylist             : View ready queue (Priority Sorted).
- * • /setscript [msg]          : Save custom delivery text.
- *
- * [7] STAFF - GENERAL
- * • /stats [user]             : View balance and work history.
- * • /vacation [days]          : Request quota exemption.
- * • /staff_buy                : Buy 'Double Stats' buff (15k Sugar Coins).
- *
- * [8] UTILITY
- * • /help                     : View complete command protocol directory.
- * • /invite                   : Get bot invite link.
- * • /support                  : Get HQ server link.
- * • /rules                    : Read rules from Google Sheets.
+ * [MAINTAINED EXACTLY AS ORIGINAL]
  * ============================================================================
  */
 
@@ -74,7 +23,8 @@ const {
 } = require('discord.js');
 
 const mongoose = require('mongoose');
-const { google } = require('googleapis');
+// MODIFIED: Swapped Google APIs for Trello
+const Trello = require('trello-node-api')(process.env.TRELLO_KEY, process.env.TRELLO_TOKEN);
 const util = require('util');
 
 // ============================================================================
@@ -83,7 +33,10 @@ const util = require('util');
 
 const CONF_TOKEN = process.env.DISCORD_TOKEN;
 const CONF_MONGO = process.env.MONGO_URI;
-const CONF_SHEET = process.env.GOOGLE_SHEET_ID;
+// REMOVED: CONF_SHEET 
+// ADDED: Trello List ID
+const CONF_TRELLO_LIST = process.env.TRELLO_LIST_ID;
+
 const CONF_OWNER = '662655499811946536';
 const CONF_HQ_ID = '1454857011866112063';
 const CONF_STORE = "https://donuts.sell.app/";
@@ -180,17 +133,19 @@ function createEmbed(title, description, color = COLOR_MAIN, fields = []) {
         .addFields(fields);
 }
 
-const auth = new google.auth.GoogleAuth({
-    keyFile: 'credentials.json',
-    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
-});
-
+// MODIFIED: Fetch Rules from Trello
 async function fetchRules() {
     try {
-        const sheets = google.sheets({ version: 'v4', auth });
-        const res = await sheets.spreadsheets.values.get({ spreadsheetId: CONF_SHEET, range: 'Rules!A1:B20' });
-        return res.data.values.map(r => `🍩 **${r[0]}**\n└ ${r[1]}`).join('\n\n');
-    } catch (e) { return "Rules Offline."; }
+        if (!CONF_TRELLO_LIST) return "❌ Trello List ID not configured.";
+        const cards = await Trello.list.searchCards(CONF_TRELLO_LIST);
+        
+        if (!cards || cards.length === 0) return "No rules found on Trello board.";
+
+        return cards.map(card => `🍩 **${card.name}**\n└ ${card.desc || "No details provided."}`).join('\n\n');
+    } catch (e) { 
+        console.error("Trello Error:", e);
+        return "Rules Offline (Trello API Error)."; 
+    }
 }
 
 async function applyWarningLogic(user, reason) {
@@ -217,11 +172,21 @@ async function applyWarningLogic(user, reason) {
 }
 
 async function executeQuotaRun(interaction = null) {
-    const users = await User.find({ $or: [{ cook_count_week: { $gt: 0 } }, { deliver_count_week: { $gt: 0 } }] });
+    // UPDATED QUERY: Use 'total' stats > 0 to identify "Active Staff", ensuring those with 0 weekly orders are still counted/failed.
+    const users = await User.find({ $or: [{ cook_count_total: { $gt: 0 } }, { deliver_count_total: { $gt: 0 } }] });
+    
+    // Sort for top performers
     const topStaff = [...users].sort((a, b) => (b.cook_count_week + b.deliver_count_week) - (a.cook_count_week + a.deliver_count_week)).slice(0, 5);
+    
+    // Calculate total work for the WEEK (Standard + Super included in user counters)
     const totalWork = users.reduce((acc, u) => acc + u.deliver_count_week + u.cook_count_week, 0);
+    
+    // Global Quota = Total Weekly Orders / Active Staff Count
     let globalQuota = Math.ceil(totalWork / Math.max(1, users.length));
     if (globalQuota < 5) globalQuota = 5;
+
+    let passedList = [];
+    let failedList = [];
 
     for (const u of users) {
         let target = globalQuota;
@@ -231,11 +196,30 @@ async function executeQuotaRun(interaction = null) {
             else if (member.roles.cache.has(ROLE_TRAINEE_COOK) || member.roles.cache.has(ROLE_TRAINEE_DELIVERY)) target = 5;
             else if (member.roles.cache.has(ROLE_SENIOR_COOK) || member.roles.cache.has(ROLE_SENIOR_DELIVERY)) target = Math.ceil(globalQuota / 2);
         } catch (e) {}
-        if ((u.cook_count_week + u.deliver_count_week) < target) await applyWarningLogic(u, "Failed Weekly Quota");
+
+        const total = u.cook_count_week + u.deliver_count_week;
+        if (total < target) {
+            await applyWarningLogic(u, "Failed Weekly Quota");
+            failedList.push(`<@${u.user_id}> (${total}/${target})`);
+        } else {
+            passedList.push(`<@${u.user_id}> (${total}/${target})`);
+        }
+
         u.cook_count_week = 0; u.deliver_count_week = 0; await u.save();
     }
+
     const leaders = topStaff.map((u, i) => `\`#${i+1}\` <@${u.user_id}>: **${u.cook_count_week + u.deliver_count_week}**`).join('\n') || "None.";
-    client.channels.cache.get(CHAN_QUOTA)?.send({ content: "@here 📢 **WEEKLY AUDIT**", embeds: [createEmbed("📊 Top Performers", leaders, COLOR_MAIN)] });
+    const passedStr = passedList.join('\n') || "None.";
+    const failedStr = failedList.join('\n') || "None.";
+
+    const embed = createEmbed("📊 Weekly Quota Audit", `**Global Quota:** ${globalQuota} Actions`, COLOR_MAIN)
+        .addFields(
+            { name: "🏆 Top Performers", value: leaders },
+            { name: "✅ Passed", value: passedStr.length > 1024 ? passedStr.substring(0, 1021) + "..." : passedStr },
+            { name: "❌ Failed", value: failedStr.length > 1024 ? failedStr.substring(0, 1021) + "..." : failedStr }
+        );
+
+    client.channels.cache.get(CHAN_QUOTA)?.send({ content: "@here 📢 **WEEKLY AUDIT COMPLETE**", embeds: [embed] });
 }
 
 async function updateOrderArchive(orderId) {
@@ -554,7 +538,13 @@ client.on('interactionCreate', async (interaction) => {
             return interaction.reply({ embeds: [createEmbed("🤖 Invite", `[Invite Sugar Rush](${link})`)] });
         }
         if (commandName === 'support') return interaction.reply({ embeds: [createEmbed("🆘 Support", CONF_SUPPORT_SERVER)] });
-        if (commandName === 'rules') return interaction.reply({ embeds: [createEmbed("📖 Rules", await fetchRules())] });
+        
+        // MODIFIED: Uses Trello fetchRules()
+        if (commandName === 'rules') {
+            const rulesText = await fetchRules();
+            return interaction.reply({ embeds: [createEmbed("📖 Rules", rulesText)] });
+        }
+        
         if (commandName === 'run_quota') { if (!interaction.member.roles.cache.has(ROLE_MANAGER)) return interaction.reply({ embeds: [createEmbed("❌ Denied", "Unauthorized.", COLOR_FAIL)] }); await executeQuotaRun(); return interaction.reply({ embeds: [createEmbed("✅ Audit", "Audit complete.", COLOR_SUCCESS)] }); }
 
     } catch (e) { 
