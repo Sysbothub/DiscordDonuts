@@ -2,10 +2,60 @@
  * ============================================================================
  * SUGAR RUSH - MASTER DISCORD AUTOMATION INFRASTRUCTURE
  * ============================================================================
- * * VERSION: 82.6.11 (TRELLO RULES INTEGRATION)
+ * * VERSION: 82.6.12 (TRELLO API FIX)
  * * ----------------------------------------------------------------------------
  * 📜 FULL COMMAND REGISTER (35 TOTAL COMMANDS):
- * [MAINTAINED EXACTLY AS ORIGINAL]
+ *
+ * [1] OWNER & SYSTEM
+ * • /generate_codes [amt]     : Creates VIP codes.
+ * • /serverblacklist [id] [r] : Bans a specific server.
+ * • /unserverblacklist [id]   : Unbans a server.
+ *
+ * [2] MANAGEMENT & DISCIPLINE
+ * • /warn [id] [reason]       : Warns user.
+ * • /fdo [id] [reason]        : Force Discipline.
+ * • /force_warn [id] [reason] : Force Warn.
+ * • /ban [uid] [days]         : Service bans a user.
+ * • /unban [uid]              : Removes service ban.
+ * • /refund [id]              : Refunds an order.
+ * • /run_quota                : Manually triggers quota audit.
+ *
+ * [3] CUSTOMER - ECONOMY & VIP
+ * • /balance                  : Shows wallet.
+ * • /daily                    : Claims daily reward.
+ * • /tip [id] [amt]           : Tips staff.
+ * • /redeem [code]            : Activates VIP.
+ * • /premium                  : Links to shop.
+ *
+ * [4] CUSTOMER - ORDERING
+ * • /order [item]             : Standard Order.
+ * • /super_order [item]       : Priority Order.
+ * • /orderstatus              : Checks status.
+ * • /orderinfo [id]           : Shows details.
+ * • /oinfo [id]               : Shortcut.
+ * • /rate [id] [stars] [fb]   : Rates order.
+ * • /review [rating] [msg]    : Submit review.
+ *
+ * [5] STAFF - KITCHEN
+ * • /claim [id]               : Assigns order.
+ * • /cook [id] [proofs...]    : Starts timer.
+ * • /orderlist                 : View queue.
+ *
+ * [6] STAFF - DELIVERY
+ * • /deliver [id]             : Pick up order.
+ * • /deliverylist             : View queue.
+ * • /setscript [msg]          : Save custom text.
+ *
+ * [7] STAFF - GENERAL
+ * • /stats [user]             : View stats.
+ * • /vacation [days]          : Request exemption.
+ * • /staff_buy                : Buy 'Double Stats'.
+ *
+ * [8] UTILITY
+ * • /help                     : View directory.
+ * • /invite                   : Get bot invite.
+ * • /support                  : Get HQ link.
+ * • /rules                    : Read rules from Trello.
  * ============================================================================
  */
 
@@ -23,9 +73,10 @@ const {
 } = require('discord.js');
 
 const mongoose = require('mongoose');
-// MODIFIED: Swapped Google APIs for Trello
-const Trello = require('trello-node-api')(process.env.TRELLO_KEY, process.env.TRELLO_TOKEN);
 const util = require('util');
+
+// TRELLO INTEGRATION
+const Trello = require('trello-node-api')(process.env.TRELLO_KEY, process.env.TRELLO_TOKEN);
 
 // ============================================================================
 // [1] CONFIGURATION & CONSTANTS
@@ -33,9 +84,7 @@ const util = require('util');
 
 const CONF_TOKEN = process.env.DISCORD_TOKEN;
 const CONF_MONGO = process.env.MONGO_URI;
-// REMOVED: CONF_SHEET 
-// ADDED: Trello List ID
-const CONF_TRELLO_LIST = process.env.TRELLO_LIST_ID;
+const CONF_TRELLO_LIST = process.env.TRELLO_LIST_ID; // Must be in .env
 
 const CONF_OWNER = '662655499811946536';
 const CONF_HQ_ID = '1454857011866112063';
@@ -133,18 +182,25 @@ function createEmbed(title, description, color = COLOR_MAIN, fields = []) {
         .addFields(fields);
 }
 
-// MODIFIED: Fetch Rules from Trello
+// FIX: Updated Trello Logic to use getCards instead of searchCards
 async function fetchRules() {
     try {
-        if (!CONF_TRELLO_LIST) return "❌ Trello List ID not configured.";
-        const cards = await Trello.list.searchCards(CONF_TRELLO_LIST);
+        if (!CONF_TRELLO_LIST) {
+            console.error("❌ ERROR: TRELLO_LIST_ID is missing from .env file.");
+            return "Configuration Error: Missing Trello List ID.";
+        }
+
+        // Using .getCards is the standard way to get cards from a List ID
+        const cards = await Trello.list.getCards(CONF_TRELLO_LIST);
         
-        if (!cards || cards.length === 0) return "No rules found on Trello board.";
+        if (!cards || !Array.isArray(cards) || cards.length === 0) {
+            return "No rules found in the connected Trello list.";
+        }
 
         return cards.map(card => `🍩 **${card.name}**\n└ ${card.desc || "No details provided."}`).join('\n\n');
     } catch (e) { 
-        console.error("Trello Error:", e);
-        return "Rules Offline (Trello API Error)."; 
+        console.error("❌ TRELLO API ERROR:", e); // This will show the real error in console
+        return "Rules Offline (Check Console for API Error)."; 
     }
 }
 
@@ -172,16 +228,11 @@ async function applyWarningLogic(user, reason) {
 }
 
 async function executeQuotaRun(interaction = null) {
-    // UPDATED QUERY: Use 'total' stats > 0 to identify "Active Staff", ensuring those with 0 weekly orders are still counted/failed.
     const users = await User.find({ $or: [{ cook_count_total: { $gt: 0 } }, { deliver_count_total: { $gt: 0 } }] });
     
-    // Sort for top performers
     const topStaff = [...users].sort((a, b) => (b.cook_count_week + b.deliver_count_week) - (a.cook_count_week + a.deliver_count_week)).slice(0, 5);
-    
-    // Calculate total work for the WEEK (Standard + Super included in user counters)
     const totalWork = users.reduce((acc, u) => acc + u.deliver_count_week + u.cook_count_week, 0);
     
-    // Global Quota = Total Weekly Orders / Active Staff Count
     let globalQuota = Math.ceil(totalWork / Math.max(1, users.length));
     if (globalQuota < 5) globalQuota = 5;
 
