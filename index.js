@@ -635,8 +635,14 @@ client.on('ready', async () => {
             for (const order of stale) {
                 const channel = await client.channels.fetch(order.channel_id).catch(() => null);
                 if (channel) {
-                    const proofs = order.images?.length ? order.images.map((l, i) => `**Proof ${i+1}:** ${l}`).join('\n') : "None.";
-                    const embed = createEmbed("📦 Order Delivered", `Hello <@${order.user_id}>,\nThank you for choosing Sugar Rush\nYour order has hit the fast track and has now Arrived.\n\n**ID:** \`${order.order_id}\`\n**Item:** ${order.item}\n**Proofs:**\n${proofs}`, COLOR_SUCCESS);
+                    let proofsText = "None.";
+                    if (order.images?.length > 0) {
+                        proofsText = order.images.map((l, i) => `**Proof ${i+1}:** [View Image](${l})`).join('\n');
+                    }
+                    const embed = createEmbed("📦 Order Delivered", `Hello <@${order.user_id}>,\nThank you for choosing Sugar Rush\nYour order has hit the fast track and has now Arrived.\n\n**ID:** \`${order.order_id}\`\n**Item:** ${order.item}\n**Proofs:**\n${proofsText}`, COLOR_SUCCESS);
+                    if (order.images && order.images.length > 0) {
+                        embed.setImage(order.images[0]);
+                    }
                     await channel.send({ content: `<@${order.user_id}>`, embeds: [embed] }).catch(() => {});
                 }
                 order.status = 'delivered'; order.deliverer_id = 'SYSTEM'; await order.save();
