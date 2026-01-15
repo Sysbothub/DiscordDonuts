@@ -2,7 +2,7 @@
  * ============================================================================
  * SUGAR RUSH - MASTER DISCORD AUTOMATION INFRASTRUCTURE
  * ============================================================================
- * * VERSION: 82.6.13 (NATIVE HTTPS FIX)
+ * * VERSION: 82.6.16 (VIP OVERFLOW BYPASS COOLDOWN)
  * * ----------------------------------------------------------------------------
  * 📜 FULL COMMAND REGISTER (35 TOTAL COMMANDS):
  * [MAINTAINED EXACTLY AS ORIGINAL]
@@ -34,6 +34,7 @@ const CONF_MONGO = process.env.MONGO_URI;
 const CONF_TRELLO_LIST = process.env.TRELLO_LIST_ID;
 const CONF_TRELLO_KEY = process.env.TRELLO_KEY;
 const CONF_TRELLO_TOKEN = process.env.TRELLO_TOKEN;
+const CONF_TOPGG_TOKEN = process.env.TOPGG_TOKEN;
 
 const CONF_OWNER = '662655499811946536';
 const CONF_HQ_ID = '1454857011866112063';
@@ -62,9 +63,9 @@ const CHAN_RATINGS = '1454884136740327557';
 const CHAN_VACATION = '1454886383662665972';
 
 // COLORS
-const COLOR_MAIN = 0xFFA500;   
-const COLOR_VIP = 0xF1C40F;    
-const COLOR_FAIL = 0xFF0000;   
+const COLOR_MAIN = 0xFFA500;    
+const COLOR_VIP = 0xF1C40F;     
+const COLOR_FAIL = 0xFF0000;    
 const COLOR_SUCCESS = 0x2ECC71; 
 
 // ============================================================================
@@ -80,6 +81,7 @@ const UserSchema = new mongoose.Schema({
     deliver_count_week: { type: Number, default: 0 },
     deliver_count_total: { type: Number, default: 0 },
     vip_until: { type: Date, default: new Date(0) },
+    last_overflow_bypass: { type: Date, default: new Date(0) }, // [NEW] Track Bypass Time
     is_perm_banned: { type: Boolean, default: false },
     service_ban_until: { type: Date, default: null },
     double_stats_until: { type: Date, default: new Date(0) },
@@ -162,6 +164,25 @@ async function fetchRules() {
             resolve("⚠️ Rules Offline (Connection Error).");
         });
     });
+}
+
+function postTopGGStats(serverCount, botId) {
+    if (!CONF_TOPGG_TOKEN) return;
+    const data = JSON.stringify({ server_count: serverCount });
+    const options = {
+        hostname: 'top.gg',
+        path: `/api/bots/${botId}/stats`,
+        method: 'POST',
+        headers: {
+            'Authorization': CONF_TOPGG_TOKEN,
+            'Content-Type': 'application/json',
+            'Content-Length': data.length
+        }
+    };
+    const req = https.request(options, (res) => {});
+    req.on('error', (error) => { console.error('[Top.gg] Error:', error); });
+    req.write(data);
+    req.end();
 }
 
 async function applyWarningLogic(user, reason) {
@@ -417,6 +438,22 @@ client.on('interactionCreate', async (interaction) => {
 
         if (commandName === 'order' || commandName === 'super_order') {
             const isVip = userData.vip_until > Date.now();
+            
+            // [NEW] OVERFLOW PROTECTION WITH VIP COOLDOWN (6 HOURS)
+            const queueCount = await Order.countDocuments({ status: 'pending' });
+            if (queueCount >= 30) {
+                if (!isVip) {
+                    return interaction.reply({ embeds: [createEmbed("⛔ Kitchen Overflow", `The kitchen is currently overloaded (${queueCount} orders).\n**Standard ordering is paused.**\n\n💎 **VIP Members** may bypass this lock once every 6 hours.`, COLOR_FAIL)], ephemeral: true });
+                } else {
+                    // VIP Check Cooldown
+                    if (Date.now() - userData.last_overflow_bypass < 21600000) { // 6 hours in ms
+                        return interaction.reply({ embeds: [createEmbed("⛔ VIP Bypass Cooldown", `You have already used your Emergency Bypass recently.\n**Please wait for the queue to clear.**`, COLOR_FAIL)], ephemeral: true });
+                    }
+                    // Allow and update timestamp
+                    userData.last_overflow_bypass = Date.now();
+                }
+            }
+
             let cost = commandName === 'super_order' ? 150 : 100; if (isVip) cost = Math.ceil(cost * 0.5);
             if (userData.balance < cost) return interaction.reply({ embeds: [createEmbed("❌ Insufficient Funds", `Need ${cost} Sugar Coins.`, COLOR_FAIL)] });
             const count = await Order.countDocuments({ user_id: interaction.user.id, status: { $in: ['pending', 'claimed', 'cooking', 'ready'] } });
@@ -569,10 +606,12 @@ client.on('interactionCreate', async (interaction) => {
 // ============================================================================
 
 let statusIndex = 0;
+let topggTick = 0;
 
 client.on('ready', async () => {
     mongoose.connect(CONF_MONGO);
     console.log("Sugar Rush Build Online.");
+    postTopGGStats(client.guilds.cache.size, client.user.id);
     
     const commands = [
         { name: 'generate_codes', description: 'Generate VIP codes', options: [{ name: 'amount', type: 4, description: 'Amount', required: true }] },
@@ -629,6 +668,12 @@ client.on('ready', async () => {
 
             client.user.setPresence({ activities: [statuses[statusIndex]], status: 'online' });
             statusIndex = (statusIndex + 1) % statuses.length;
+
+            topggTick++;
+            if (topggTick >= 30) {
+                postTopGGStats(serverCount, client.user.id);
+                topggTick = 0;
+            }
 
             const threshold = new Date(Date.now() - 20 * 60 * 1000);
             const stale = await Order.find({ status: 'ready', ready_at: { $lt: threshold } });
