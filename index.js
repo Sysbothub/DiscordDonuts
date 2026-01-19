@@ -684,7 +684,7 @@ client.on('ready', async () => {
                     if (order.images?.length > 0) {
                         proofsText = order.images.map((l, i) => `**Proof ${i+1}:** [View Image](${l})`).join('\n');
                     }
-                    const embed = createEmbed("📦 Order Delivered", `Hello <@${order.user_id}>,\nThank you for choosing Sugar Rush\nYour order has hit the fast track and has now Arrived.\n\n**ID:** \`${order.order_id}\`\n**Item:** ${order.item}\n**Proofs:**\n${proofsText}`, COLOR_SUCCESS);
+                    const embed = createEmbed("📦 Order Delivered", `Hello <@${order.user_id}>,\nThank you for choosing Sugar Rush\nDue to an issue with Sugar Rush Lacking the create instant invites Permission.\n Our Delivery staff are unable to deliver Your order to you in person,\n Your order has therefore been handed off to me for Automated Delivery.\n\n**Order ID:** \`${order.order_id}\`\n**Item:** ${order.item}\n**Proofs:**\n${proofsText}`, COLOR_SUCCESS);
                     if (order.images && order.images.length > 0) {
                         embed.setImage(order.images[0]);
                     }
