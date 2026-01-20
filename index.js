@@ -2,7 +2,7 @@
  * ============================================================================
  * SUGAR RUSH - MASTER DISCORD AUTOMATION INFRASTRUCTURE
  * ============================================================================
- * * VERSION: 82.6.32 (REMOVED PUBLIC NSFW TERMS)
+ * * VERSION: 82.6.35 (FIXED PLACEHOLDER LOGIC)
  * * ----------------------------------------------------------------------------
  * 📜 FULL COMMAND REGISTER (38 TOTAL COMMANDS):
  * [MAINTAINED EXACTLY AS ORIGINAL]
@@ -701,9 +701,31 @@ client.on('interactionCreate', async (interaction) => {
                 const inv = await guild.channels.cache.random().createInvite();
                 o.status = 'delivering'; o.deliverer_id = interaction.user.id; await o.save();
                 updateOrderArchive(o.order_id); 
+                
+                // [UPDATED] FETCH CUSTOM SCRIPT & APPLY ALL PLACEHOLDERS
+                const driverData = await Script.findOne({ user_id: interaction.user.id });
+                let msgContent = driverData ? driverData.script : "Hello {user}! 🍩\nHere is your **{item}** from **Sugar Rush**.\n\nThank you for ordering with us! If you enjoyed the service, please consider leaving a rating.";
+                
+                // [FIXED] FULL PLACEHOLDER SUPPORT
+                msgContent = msgContent
+                    .replace(/{user}/g, `<@${o.user_id}>`)
+                    .replace(/{item}/g, o.item)
+                    .replace(/{server}/g, o.guild_name || "the server")
+                    .replace(/{channel}/g, o.channel_name ? `#${o.channel_name}` : "your channel")
+                    .replace(/{order_id}/g, o.order_id);
+
                 const proofs = o.images?.length ? o.images.map((l, i) => `**Proof ${i+1}:** ${l}`).join('\n') : "None.";
                 const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`complete_${o.order_id}`).setLabel('Confirm Delivery').setStyle(ButtonStyle.Success));
-                await interaction.user.send({ content: `**📦 DISPATCH**\n\n**Dest:** ${inv.url}\n**User:** <@${o.user_id}>\n\n**🍳 PROOFS:**\n${proofs}`, components: [row] });
+                
+                await interaction.user.send({ 
+                    content: `**📦 DISPATCH**\n\n` +
+                             `**Dest:** ${inv.url}\n` +
+                             `**User:** <@${o.user_id}>\n\n` +
+                             `**📜 COPY & PASTE THIS SCRIPT:**\n` +
+                             `\`\`\`\n${msgContent}\n\`\`\`\n\n` +
+                             `**🍳 PROOFS:**\n${proofs}`, 
+                    components: [row] 
+                });
                 
                 // 5 MINUTE TIMEOUT
                 setTimeout(async () => {
@@ -754,8 +776,35 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         if (commandName === 'setscript') {
-            await Script.findOneAndUpdate({ user_id: interaction.user.id }, { script: options.getString('message') }, { upsert: true });
-            return interaction.reply({ embeds: [createEmbed("✅ Saved", "Script updated.", COLOR_SUCCESS)] });
+            // [NEW] INTERACTIVE SCRIPT SETUP
+            await interaction.reply({ 
+                embeds: [createEmbed("📜 Set Delivery Script", 
+                    "Please **reply to this message** with your new delivery script.\n\n" +
+                    "**Available Smart Placeholders:**\n" +
+                    "`{user}` - Customers Mention\n" +
+                    "`{item}` - Ordered Item\n" +
+                    "`{server}` - Server Name\n" +
+                    "`{channel}` - Channel Name\n" +
+                    "`{order_id}` - Order ID\n\n" +
+                    "**Example:**\n" +
+                    "\"Hello {user}! Here is your {item}. Thanks for ordering from {server}!\"")], 
+                ephemeral: true 
+            });
+
+            const filter = m => m.author.id === interaction.user.id;
+            const collector = interaction.channel.createMessageCollector({ filter, time: 60000, max: 1 });
+
+            collector.on('collect', async m => {
+                const newScript = m.content;
+                await Script.findOneAndUpdate({ user_id: interaction.user.id }, { script: newScript }, { upsert: true });
+                await m.reply({ embeds: [createEmbed("✅ Script Updated", `Your new script has been saved!\n\n**Preview:**\n\`\`\`\n${newScript}\n\`\`\``, COLOR_SUCCESS)] });
+                // Note: We don't delete user's message to keep record/context for them
+            });
+
+            collector.on('end', collected => {
+                if (collected.size === 0) interaction.followUp({ content: "❌ Time expired. Script not updated.", ephemeral: true });
+            });
+            return; // STOP execution here
         }
 
         if (commandName === 'stats') {
@@ -791,6 +840,12 @@ client.on('interactionCreate', async (interaction) => {
             const count = await PartnerServer.countDocuments();
             const embed = createEmbed("🤝 Sugar Rush Partnerships", 
                 "Partnering with Sugar Rush brings sweet benefits to your community!\n\n" +
+                "**📋 Standard Requirements:**\n" +
+                "• **1,000 Active Members** (Bots excluded; subject to change).\n" +
+                "• **Active Community** with consistent engagement.\n" +
+                "• **Sugar Rush** must be active in the server.\n" +
+                "• **Clean Record:** No moderation history with Sugar Rush in the past 5 months.\n\n" +
+                "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n" +
                 "**💎 Verified Partner Perks:**\n" +
                 "• **Free Economy:** All orders placed within Partner Servers are **100% FREE**.\n" +
                 "• **Priority Support:** Direct line to our logistics team.\n" +
@@ -863,7 +918,7 @@ client.on('ready', async () => {
         { name: 'orderlist', description: 'View queue' },
         { name: 'deliver', description: 'Deliver order', options: [{ name: 'id', type: 3, description: 'Order ID', required: true }] },
         { name: 'deliverylist', description: 'View delivery queue' },
-        { name: 'setscript', description: 'Set delivery script', options: [{ name: 'message', type: 3, description: 'Message', required: true }] },
+        { name: 'setscript', description: 'Set delivery script' },
         { name: 'stats', description: 'View stats', options: [{ name: 'user', type: 6, description: 'User', required: false }] },
         { name: 'vacation', description: 'Request vacation', options: [{ name: 'duration', type: 4, description: 'Days', required: true }] },
         { name: 'staff_buy', description: 'Buy buff' },
