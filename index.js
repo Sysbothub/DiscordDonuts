@@ -2,7 +2,7 @@
  * ============================================================================
  * SUGAR RUSH - MASTER DISCORD AUTOMATION INFRASTRUCTURE
  * ============================================================================
- * * VERSION: 82.6.16 (VIP OVERFLOW BYPASS COOLDOWN)
+ * * VERSION: 82.6.19 (ORIGIN TRACKING UPDATE)
  * * ----------------------------------------------------------------------------
  * 📜 FULL COMMAND REGISTER (35 TOTAL COMMANDS):
  * [MAINTAINED EXACTLY AS ORIGINAL]
@@ -19,7 +19,8 @@ const {
     ActionRowBuilder, 
     ButtonBuilder, 
     ButtonStyle, 
-    ActivityType 
+    ActivityType,
+    ComponentType 
 } = require('discord.js');
 
 const mongoose = require('mongoose');
@@ -81,7 +82,7 @@ const UserSchema = new mongoose.Schema({
     deliver_count_week: { type: Number, default: 0 },
     deliver_count_total: { type: Number, default: 0 },
     vip_until: { type: Date, default: new Date(0) },
-    last_overflow_bypass: { type: Date, default: new Date(0) }, // [NEW] Track Bypass Time
+    last_overflow_bypass: { type: Date, default: new Date(0) },
     is_perm_banned: { type: Boolean, default: false },
     service_ban_until: { type: Date, default: null },
     double_stats_until: { type: Date, default: new Date(0) },
@@ -92,7 +93,9 @@ const OrderSchema = new mongoose.Schema({
     order_id: String,
     user_id: String,
     guild_id: String,
+    guild_name: String,   // [NEW]
     channel_id: String,
+    channel_name: String, // [NEW]
     status: { type: String, default: 'pending' }, 
     item: String,
     is_vip: { type: Boolean, default: false },
@@ -300,9 +303,11 @@ client.on('interactionCreate', async (interaction) => {
                 const o = await Order.findOne({ order_id: args[0] });
                 try { await client.guilds.cache.get(o.guild_id).members.fetch(interaction.user.id); } catch (e) {
                     o.status = 'ready'; o.deliverer_id = null; await o.save();
+                    updateOrderArchive(o.order_id); 
                     return interaction.update({ embeds: [createEmbed("PAYMENT FORFEITED", "Presence in destination server required for pay claim. Order reset.", COLOR_FAIL)], components: [] });
                 }
                 o.status = 'delivered'; await o.save();
+                updateOrderArchive(o.order_id); 
                 await User.findOneAndUpdate({ user_id: interaction.user.id }, { $inc: { balance: 30, deliver_count_week: 1, deliver_count_total: 1 } });
                 return interaction.update({ embeds: [createEmbed("CONFIRMED", "30 Sugar Coins added to vault.", COLOR_SUCCESS)], components: [] });
             }
@@ -382,6 +387,7 @@ client.on('interactionCreate', async (interaction) => {
             const target = await User.findOne({ user_id: o.user_id }) || new User({ user_id: o.user_id });
             const pen = await applyWarningLogic(target, options.getString('reason'));
             o.status = commandName === 'warn' ? 'cancelled_warn' : 'cancelled_fdo'; await o.save();
+            updateOrderArchive(o.order_id); 
             return interaction.reply({ embeds: [createEmbed("✅ Action Logged", `Penalty: ${pen}`, COLOR_SUCCESS)] });
         }
 
@@ -402,6 +408,7 @@ client.on('interactionCreate', async (interaction) => {
             const o = await Order.findOne({ order_id: options.getString('id') });
             if (o) await User.findOneAndUpdate({ user_id: o.user_id }, { $inc: { balance: 100 } });
             o.status = 'refunded'; await o.save();
+            updateOrderArchive(o.order_id); 
             return interaction.reply({ embeds: [createEmbed("✅ Refunded", "Order refunded successfully.", COLOR_SUCCESS)] });
         }
 
@@ -438,34 +445,138 @@ client.on('interactionCreate', async (interaction) => {
 
         if (commandName === 'order' || commandName === 'super_order') {
             const isVip = userData.vip_until > Date.now();
-            
-            // [NEW] OVERFLOW PROTECTION WITH VIP COOLDOWN (6 HOURS)
+            let cost = commandName === 'super_order' ? 150 : 100;
+            if (isVip) cost = Math.ceil(cost * 0.5); // VIP Discount
+
+            // [NEW] OVERFLOW PROTECTION WITH PAID BYPASS
             const queueCount = await Order.countDocuments({ status: 'pending' });
-            if (queueCount >= 30) {
-                if (!isVip) {
-                    return interaction.reply({ embeds: [createEmbed("⛔ Kitchen Overflow", `The kitchen is currently overloaded (${queueCount} orders).\n**Standard ordering is paused.**\n\n💎 **VIP Members** may bypass this lock once every 6 hours.`, COLOR_FAIL)], ephemeral: true });
-                } else {
-                    // VIP Check Cooldown
-                    if (Date.now() - userData.last_overflow_bypass < 21600000) { // 6 hours in ms
-                        return interaction.reply({ embeds: [createEmbed("⛔ VIP Bypass Cooldown", `You have already used your Emergency Bypass recently.\n**Please wait for the queue to clear.**`, COLOR_FAIL)], ephemeral: true });
+            const MAX_QUEUE = 30;
+            const BYPASS_FEE = 75;
+
+            if (queueCount >= MAX_QUEUE) {
+                let isFreeBypass = false;
+                
+                // VIP: Check Cooldown (6 Hours)
+                if (isVip) {
+                    if (Date.now() - userData.last_overflow_bypass >= 21600000) { 
+                        isFreeBypass = true;
+                        userData.last_overflow_bypass = Date.now(); 
+                        await userData.save();
                     }
-                    // Allow and update timestamp
-                    userData.last_overflow_bypass = Date.now();
                 }
+
+                if (!isFreeBypass) {
+                    // OFFER PAID BYPASS
+                    const totalCost = cost + BYPASS_FEE;
+
+                    // 1. Check if they are broke
+                    if (userData.balance < totalCost) {
+                        return interaction.reply({ 
+                            embeds: [createEmbed("⛔ Kitchen Overflow", `The kitchen is full (${queueCount}/${MAX_QUEUE}).\nYou need **${totalCost} Sugar Coins** (Base: ${cost} + Bypass: ${BYPASS_FEE}) to skip the line, but you are broke.`, COLOR_FAIL)], 
+                            ephemeral: true 
+                        });
+                    }
+
+                    // 2. Offer Buttons
+                    const row = new ActionRowBuilder().addComponents(
+                        new ButtonBuilder().setCustomId('buy_bypass').setLabel(`Pay Bypass (+${BYPASS_FEE})`).setStyle(ButtonStyle.Success).setEmoji('🚀'),
+                        new ButtonBuilder().setCustomId('cancel_order').setLabel('Cancel').setStyle(ButtonStyle.Secondary)
+                    );
+
+                    const msg = await interaction.reply({
+                        embeds: [createEmbed("⚠️ Kitchen Capacity Reached", `Queue is full (${queueCount}/${MAX_QUEUE}).\n\n**Standard ordering is paused.**\nWould you like to pay an extra **${BYPASS_FEE} Sugar Coins** to bypass the queue?`, COLOR_VIP)],
+                        components: [row],
+                        ephemeral: true,
+                        fetchReply: true
+                    });
+
+                    // 3. Handle Button Click
+                    const collector = msg.createMessageComponentCollector({ componentType: ComponentType.Button, time: 15000 });
+
+                    collector.on('collect', async i => {
+                        if (i.customId === 'cancel_order') {
+                            return i.update({ content: "❌ Cancelled.", embeds: [], components: [] });
+                        }
+
+                        if (i.customId === 'buy_bypass') {
+                            // Re-verify Balance
+                            const freshUser = await User.findOne({ user_id: interaction.user.id });
+                            if (freshUser.balance < totalCost) return i.update({ content: "❌ Insufficient funds.", components: [] });
+
+                            // Execute Purchase
+                            freshUser.balance -= totalCost;
+                            await freshUser.save();
+
+                            // Create Order (Duplicate logic to ensure safety within closure)
+                            const count = await Order.countDocuments({ user_id: interaction.user.id, status: { $in: ['pending', 'claimed', 'cooking', 'ready'] } });
+                            if (count >= 3) return i.update({ content: "❌ Limit Reached (3 active orders).", components: [] });
+
+                            const oid = Math.random().toString(36).substring(2, 8).toUpperCase();
+                            const cookChan = client.channels.cache.get(CHAN_COOK);
+                            let kitchenMsgId = null;
+                            if (cookChan) {
+                                const m = await cookChan.send({ 
+                                    content: "@here 🚀 **PRIORITY BYPASS**", 
+                                    embeds: [createEmbed(
+                                        commandName === 'super_order' ? "🚀 SUPER ORDER (BYPASS)" : "🍩 New Order (BYPASS)", 
+                                        `**ID:** ${oid}\n**Item:** ${options.getString('item')}\n**Server:** ${interaction.guild.name}\n**Channel:** #${interaction.channel.name}`
+                                    )] 
+                                });
+                                kitchenMsgId = m.id;
+                            }
+                            await new Order({ 
+                                order_id: oid, 
+                                user_id: interaction.user.id, 
+                                guild_id: interaction.guildId, 
+                                guild_name: interaction.guild.name, // [ADDED]
+                                channel_id: interaction.channelId, 
+                                channel_name: interaction.channel.name, // [ADDED]
+                                item: options.getString('item'), 
+                                is_vip: isVip, 
+                                is_super: commandName === 'super_order', 
+                                kitchen_msg_id: kitchenMsgId 
+                            }).save();
+                            updateOrderArchive(oid);
+
+                            return i.update({ embeds: [createEmbed("✅ Bypassed", `Paid **${totalCost} Coins**. Order sent to kitchen.`, COLOR_SUCCESS)], components: [] });
+                        }
+                    });
+                    
+                    return; // STOP EXECUTION HERE (Do not run standard logic below)
+                }
+                // If isFreeBypass was true, we fall through to standard logic below
             }
 
-            let cost = commandName === 'super_order' ? 150 : 100; if (isVip) cost = Math.ceil(cost * 0.5);
+            // STANDARD ORDER LOGIC (Queue Not Full OR Free Bypass Used)
             if (userData.balance < cost) return interaction.reply({ embeds: [createEmbed("❌ Insufficient Funds", `Need ${cost} Sugar Coins.`, COLOR_FAIL)] });
             const count = await Order.countDocuments({ user_id: interaction.user.id, status: { $in: ['pending', 'claimed', 'cooking', 'ready'] } });
             if (count >= 3) return interaction.reply({ embeds: [createEmbed("❌ Limit", "3 active orders max.", COLOR_FAIL)] });
+            
             const oid = Math.random().toString(36).substring(2, 8).toUpperCase();
             const cookChan = client.channels.cache.get(CHAN_COOK);
             let kitchenMsgId = null;
             if (cookChan) {
-                const msg = await cookChan.send({ content: commandName === 'super_order' ? "@here 🚀 **PRIORITY**" : null, embeds: [createEmbed(commandName === 'super_order' ? "🚀 SUPER ORDER" : (isVip ? "💎 VIP ORDER" : "🍩 New Order"), `ID: ${oid}\nItem: ${options.getString('item')}`)] });
+                const msg = await cookChan.send({ 
+                    content: commandName === 'super_order' ? "@here 🚀 **PRIORITY**" : null, 
+                    embeds: [createEmbed(
+                        commandName === 'super_order' ? "🚀 SUPER ORDER" : (isVip ? "💎 VIP ORDER" : "🍩 New Order"), 
+                        `**ID:** ${oid}\n**Item:** ${options.getString('item')}\n**Server:** ${interaction.guild.name}\n**Channel:** #${interaction.channel.name}`
+                    )] 
+                });
                 kitchenMsgId = msg.id;
             }
-            await new Order({ order_id: oid, user_id: interaction.user.id, guild_id: interaction.guildId, channel_id: interaction.channelId, item: options.getString('item'), is_vip: isVip, is_super: commandName === 'super_order', kitchen_msg_id: kitchenMsgId }).save();
+            await new Order({ 
+                order_id: oid, 
+                user_id: interaction.user.id, 
+                guild_id: interaction.guildId, 
+                guild_name: interaction.guild.name, // [ADDED]
+                channel_id: interaction.channelId, 
+                channel_name: interaction.channel.name, // [ADDED]
+                item: options.getString('item'), 
+                is_vip: isVip, 
+                is_super: commandName === 'super_order', 
+                kitchen_msg_id: kitchenMsgId 
+            }).save();
             userData.balance -= cost; await userData.save();
             updateOrderArchive(oid);
             return interaction.reply({ embeds: [createEmbed("✅ Authorized", "Sent to kitchen.", COLOR_SUCCESS)] });
@@ -500,7 +611,7 @@ client.on('interactionCreate', async (interaction) => {
             if (!o) return interaction.reply({ embeds: [createEmbed("❌ Error", "Invalid ID.", COLOR_FAIL)] });
             o.status = 'claimed'; o.chef_id = interaction.user.id; o.chef_name = interaction.user.username; await o.save();
             client.users.fetch(o.user_id).then(u => u.send({ embeds: [createEmbed("👨‍🍳 Order Claimed", `Your order \`${o.order_id}\` has been claimed by **${interaction.user.username}**.`, COLOR_SUCCESS)] }).catch(() => {}));
-            updateOrderArchive(o.order_id);
+            updateOrderArchive(o.order_id); 
             setTimeout(async () => {
                 const check = await Order.findOne({ order_id: o.order_id });
                 if (check && check.status === 'claimed') { check.status = 'pending'; check.chef_id = null; await check.save(); }
@@ -517,10 +628,13 @@ client.on('interactionCreate', async (interaction) => {
             if (options.getAttachment('image2')) proofs.push(options.getAttachment('image2').url);
             if (options.getAttachment('image3')) proofs.push(options.getAttachment('image3').url);
             o.status = 'cooking'; o.images = proofs; await o.save();
+            updateOrderArchive(o.order_id); 
             client.users.fetch(o.user_id).then(u => u.send({ embeds: [createEmbed("♨️ Cooking", `Your order \`${o.order_id}\` is now being cooked!`, COLOR_MAIN)] }).catch(() => {}));
             setTimeout(async () => {
                 await Order.findOneAndUpdate({ order_id: o.order_id }, { status: 'ready', ready_at: new Date() });
-                client.channels.cache.get(CHAN_DELIVERY).send({ embeds: [createEmbed("🥡 Order Ready", `ID: ${o.order_id}\nCustomer: <@${o.user_id}>`)] });
+                updateOrderArchive(o.order_id); 
+                // [UPDATED] Delivery notification includes Server/Channel
+                client.channels.cache.get(CHAN_DELIVERY).send({ embeds: [createEmbed("🥡 Order Ready", `**ID:** ${o.order_id}\n**Customer:** <@${o.user_id}>\n**Server:** ${o.guild_name}\n**Channel:** #${o.channel_name}`)] });
             }, 180000);
             return interaction.reply({ embeds: [createEmbed("♨️ Cooking", `Started timer (3m). Proofs: ${proofs.length}`)] });
         }
@@ -533,6 +647,7 @@ client.on('interactionCreate', async (interaction) => {
                 const guild = client.guilds.cache.get(o.guild_id);
                 const inv = await guild.channels.cache.random().createInvite();
                 o.status = 'delivering'; o.deliverer_id = interaction.user.id; await o.save();
+                updateOrderArchive(o.order_id); 
                 const proofs = o.images?.length ? o.images.map((l, i) => `**Proof ${i+1}:** ${l}`).join('\n') : "None.";
                 const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`complete_${o.order_id}`).setLabel('Confirm Delivery').setStyle(ButtonStyle.Success));
                 await interaction.user.send({ content: `**📦 DISPATCH**\n\n**Dest:** ${inv.url}\n**User:** <@${o.user_id}>\n\n**🍳 PROOFS:**\n${proofs}`, components: [row] });
@@ -542,6 +657,7 @@ client.on('interactionCreate', async (interaction) => {
                     const check = await Order.findOne({ order_id: o.order_id });
                     if (check && check.status === 'delivering') {
                         check.status = 'ready'; check.deliverer_id = null; await check.save();
+                        updateOrderArchive(check.order_id); 
                     }
                 }, 300000);
 
@@ -691,6 +807,7 @@ client.on('ready', async () => {
                     await channel.send({ content: `<@${order.user_id}>`, embeds: [embed] }).catch(() => {});
                 }
                 order.status = 'delivered'; order.deliverer_id = 'SYSTEM'; await order.save();
+                updateOrderArchive(order.order_id); // [UPDATE ARCHIVE - AUTO SYSTEM]
             }
         } catch (e) { console.error(e); }
     }, 60000);
