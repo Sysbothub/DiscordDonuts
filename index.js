@@ -439,7 +439,7 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         if (commandName === 'tip') {
-            const o = await Order.findOne({ order_id: options.getString('id') });
+            const o = await Order.findOne({ order_id: options.getString('order_id') });
             if (!o) return interaction.reply({ embeds: [createEmbed("❌ Error", "Order not found.", COLOR_FAIL)] });
             const amt = options.getInteger('amount');
             if (userData.balance < amt) return interaction.reply({ embeds: [createEmbed("❌ Error", "Insufficient balance.", COLOR_FAIL)] });
@@ -667,7 +667,10 @@ client.on('interactionCreate', async (interaction) => {
             if (options.getAttachment('image2')) proofs.push(options.getAttachment('image2').url);
             if (options.getAttachment('image3')) proofs.push(options.getAttachment('image3').url);
             o.status = 'cooking'; o.images = proofs; await o.save();
-            updateOrderArchive(o.order_id); 
+            updateOrderArchive(o.order_id);
+            
+            // [FIXED] LOG COOK STATS WHEN COOK COMMAND IS SUBMITTED
+            await User.findOneAndUpdate({ user_id: interaction.user.id }, { $inc: { cook_count_week: 1, cook_count_total: 1 } });
             
             // [RETAINED] Everyone gets the "In Oven" notification
             client.users.fetch(o.user_id).then(u => u.send({ embeds: [createEmbed("♨️ Cooking", `Your order \`${o.order_id}\` is now being cooked!`, COLOR_MAIN)] }).catch(() => {}));
